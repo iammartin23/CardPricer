@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<!--
+  CARD VALUE FINDER, STAGE 1
+  This one file is the whole app. It has three parts:
+    1. HTML  (between <body> and </body>)  = what is on the page
+    2. CSS   (inside <style>)              = how it looks
+    3. JavaScript (inside <script>)        = what happens when you tap the button
+  Lines like this one, between the arrows, are comments. The browser ignores them,
+  so they are only notes for you.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- This line makes the page fit a phone screen instead of shrinking to look like a desktop site. -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Card value finder</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;600;800&display=swap" rel="stylesheet">
+
+<style>
+  /* Colors live in variables so they are easy to change in one place.
+     The second block swaps them automatically when your phone is in dark mode. */
+  :root {
+    color-scheme: light dark;
+    --paper: #f2f4f9;
+    --panel: #ffffff;
+    --ink: #1b2340;
+    --muted: #5d667d;
+    --line: #d9deea;
+    --accent: #ffcf3f;
+  }
