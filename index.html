@@ -29,3 +29,331 @@
     --line: #d9deea;
     --accent: #ffcf3f;
   }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #10142a;
+      --panel: #1a2040;
+      --ink: #eef1fb;
+      --muted: #9aa3c2;
+      --line: #2c3359;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Bricolage Grotesque", system-ui, sans-serif;
+    line-height: 1.45;
+  }
+  main { max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; }
+
+  h1 { font-size: 2rem; font-weight: 800; margin: 0 0 4px; letter-spacing: -0.02em; }
+  .lede { margin: 0 0 20px; color: var(--muted); }
+
+  form { display: grid; gap: 12px; margin-bottom: 12px; }
+  label { display: grid; gap: 4px; font-weight: 600; font-size: 0.95rem; }
+  input {
+    font: inherit; font-weight: 400;
+    padding: 12px; min-height: 48px;
+    border: 1px solid var(--line); border-radius: 8px;
+    background: var(--panel); color: var(--ink);
+  }
+  button {
+    font: inherit; font-weight: 800;
+    min-height: 52px; border: 0; border-radius: 8px;
+    background: var(--accent); color: #1b2340; cursor: pointer;
+  }
+  input:focus-visible, button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+
+  #status { min-height: 1.5em; color: var(--muted); }
+
+  /* The UK / EU / US picker: three big tap targets that work as one switch. */
+  .field-label { margin: 0 0 4px; font-weight: 600; font-size: 0.95rem; }
+  .market { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .market label {
+    position: relative; display: block; text-align: center;
+    padding: 12px 8px; min-height: 48px; cursor: pointer;
+    border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+  }
+  .market input { position: absolute; opacity: 0; pointer-events: none; }
+  .market label:has(input:checked) { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .market label:has(input:focus-visible) { outline: 3px solid var(--ink); outline-offset: 2px; }
+  .ebay-link { display: inline-block; margin-top: 12px; font-size: 0.9rem; color: var(--ink); }
+
+  /* Each result is a row: picture on the left, details on the right. */
+  .card {
+    display: grid; grid-template-columns: 110px 1fr; gap: 14px;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 12px; margin-bottom: 12px;
+  }
+  .card img { width: 100%; height: auto; border-radius: 6px; }
+  .card h2 { font-size: 1.15rem; margin: 0; }
+  .muted { color: var(--muted); font-size: 0.9rem; margin: 0; }
+  .price-row { margin-top: 10px; }
+  .price-label { font-size: 0.85rem; color: var(--muted); margin: 0; }
+  .price {
+    font-size: 1.6rem; font-weight: 800; margin: 0;
+    font-variant-numeric: tabular-nums; letter-spacing: -0.02em;
+  }
+  .price small { font-size: 0.8rem; font-weight: 400; color: var(--muted); letter-spacing: 0; }
+  .note { margin-top: 24px; font-size: 0.85rem; color: var(--muted); }
+</style>
+</head>
+
+<body>
+<main>
+  <h1>Card value finder</h1>
+  <p class="lede">Search a Pokémon card to see its recent market price.</p>
+
+  <!-- The search form. Each <input> is a box you type in. -->
+  <form id="search-form">
+    <label>Card name
+      <input id="card-name" type="text" placeholder="Charizard" autocomplete="off" required>
+    </label>
+    <label>Card number (optional, narrows the search)
+      <input id="card-number" type="text" placeholder="4 or 4/102" autocomplete="off">
+    </label>
+    <div>
+      <p class="field-label">Market and currency</p>
+      <div class="market" role="radiogroup" aria-label="Market and currency">
+        <label><input type="radio" name="market" value="uk" checked> UK (£)</label>
+        <label><input type="radio" name="market" value="eu"> EU (€)</label>
+        <label><input type="radio" name="market" value="us"> US ($)</label>
+      </div>
+    </div>
+    <button type="submit">Look up value</button>
+  </form>
+
+  <!-- The script writes messages and results into these two empty spots. -->
+  <p id="status" role="status"></p>
+  <section id="results"></section>
+
+  <p id="market-note" class="note"></p>
+  <p class="note">
+    Prices are estimates from TCGplayer and Cardmarket.
+    Condition, edition, and grading can change what a card really sells for.
+  </p>
+</main>
+
+<script>
+  // OPTIONAL: paste a free key from https://dev.pokemontcg.io between the quotes.
+  // Without a key you can make about 1,000 searches a day. With one, about 20,000.
+  // Anyone can see a key placed in a web page, which is fine for a personal tool.
+  const API_KEY = "";
+
+  // Grab the parts of the page we need to talk to, using the id names from the HTML above.
+  const form = document.getElementById("search-form");
+  const nameInput = document.getElementById("card-name");
+  const numberInput = document.getElementById("card-number");
+  const statusLine = document.getElementById("status");
+  const results = document.getElementById("results");
+  const marketNote = document.getElementById("market-note");
+
+  // The page remembers the last search, so switching UK / EU / US can redraw it
+  // without searching again.
+  let lastCards = [];
+  // The euro-to-pound exchange rate. loadRate() fills this in.
+  let eurToGbp = null;
+
+  // Small helper: makes a page element (like a paragraph) with some text and a style class.
+  function el(tag, text, className) {
+    const element = document.createElement(tag);
+    if (text) element.textContent = text;
+    if (className) element.className = className;
+    return element;
+  }
+
+  // Turns a number like 12.5 into "$12.50", "€12.50" or "£12.50".
+  const LOCALES = { USD: "en-US", EUR: "en-IE", GBP: "en-GB" };
+  function money(value, currency) {
+    return new Intl.NumberFormat(LOCALES[currency], { style: "currency", currency: currency }).format(value);
+  }
+
+  // The price service names card finishes in code-style words. This translates them.
+  const VARIANT_NAMES = {
+    normal: "Normal",
+    holofoil: "Holofoil",
+    reverseHolofoil: "Reverse holofoil",
+    "1stEditionNormal": "1st edition normal",
+    "1stEditionHolofoil": "1st edition holofoil",
+    unlimitedHolofoil: "Unlimited holofoil"
+  };
+
+  // Which market is selected: "uk", "eu" or "us".
+  function currentMarket() {
+    return document.querySelector('input[name="market"]:checked').value;
+  }
+
+  // Asks a free exchange-rate service (European Central Bank data, no key needed)
+  // for today's euro-to-pound rate. If it fails, the rate stays empty.
+  async function loadRate() {
+    try {
+      const response = await fetch("https://api.frankfurter.dev/v1/latest?base=EUR&symbols=GBP");
+      const data = await response.json();
+      eurToGbp = data.rates.GBP;
+    } catch (error) {
+      eurToGbp = null;
+    }
+  }
+
+  // Writes the explanation of the chosen market under the search form.
+  function updateNote(market) {
+    if (market === "us") {
+      marketNote.textContent = "US view: TCGplayer market price in dollars, based on recent US sales.";
+    } else if (market === "eu") {
+      marketNote.textContent = "EU view: Cardmarket trend price in euros, from European sales.";
+    } else if (eurToGbp) {
+      marketNote.textContent = "UK view: Cardmarket’s European price converted to pounds at today’s rate (€1 = £" +
+        eurToGbp.toFixed(3) + "). This is an estimate, not actual UK sales. Use the eBay link on each card to check real UK sold listings.";
+    } else {
+      marketNote.textContent = "The UK view needs an exchange rate, and it didn’t load. Check your connection and switch markets to try again.";
+    }
+  }
+
+  // Builds one price block, such as "Holofoil / $350.00 / low $200.00 to high $900.00".
+  function priceBlock(label, value, currency, rangeText) {
+    const block = el("div", "", "price-row");
+    block.append(el("p", label, "price-label"));
+    const price = el("p", money(value, currency), "price");
+    if (rangeText) {
+      price.append(" ", el("small", rangeText));
+    }
+    block.append(price);
+    return block;
+  }
+
+  // A link that opens eBay's list of sold copies of this card, on the site for the chosen market.
+  function ebayLink(card, market) {
+    const sites = { uk: ["www.ebay.co.uk", "eBay UK"], eu: ["www.ebay.de", "eBay Germany"], us: ["www.ebay.com", "eBay US"] };
+    const search = card.name + " " + card.number + "/" + card.set.printedTotal + " pokemon";
+    const link = el("a", "See sold listings on " + sites[market][1], "ebay-link");
+    link.href = "https://" + sites[market][0] + "/sch/i.html?_nkw=" + encodeURIComponent(search) + "&LH_Sold=1&LH_Complete=1";
+    link.target = "_blank";
+    link.rel = "noopener";
+    return link;
+  }
+
+  // Builds the whole row for one card, using the chosen market.
+  function renderCard(card, market) {
+    const row = el("article", "", "card");
+
+    const image = document.createElement("img");
+    image.src = card.images.small;
+    image.alt = card.name;
+    image.loading = "lazy";
+
+    const info = el("div");
+    info.append(el("h2", card.name));
+    info.append(el("p", card.set.name, "muted"));
+    info.append(el("p", "Number " + card.number + " of " + card.set.printedTotal, "muted"));
+    if (card.rarity) info.append(el("p", card.rarity, "muted"));
+
+    let foundPrice = false;
+
+    if (market === "us") {
+      // TCGplayer gives one price per finish (normal, holofoil, and so on), in dollars.
+      // "market" is its estimate based on recent sales. If missing, we fall back to "mid".
+      const usPrices = card.tcgplayer && card.tcgplayer.prices;
+      if (usPrices) {
+        for (const [variant, p] of Object.entries(usPrices)) {
+          const value = p.market != null ? p.market : p.mid;
+          if (value == null) continue;
+          const range = (p.low != null && p.high != null)
+            ? "low " + money(p.low, "USD") + " to high " + money(p.high, "USD")
+            : "";
+          info.append(priceBlock(VARIANT_NAMES[variant] || variant, value, "USD", range));
+          foundPrice = true;
+        }
+      }
+    } else {
+      // Cardmarket (Europe) gives a "trend" price in euros.
+      // The EU view shows it as is. The UK view multiplies it by the exchange rate to get pounds.
+      const euPrices = card.cardmarket && card.cardmarket.prices;
+      const currency = market === "uk" ? "GBP" : "EUR";
+      const rate = market === "uk" ? eurToGbp : 1;
+      if (euPrices && euPrices.trendPrice != null && rate) {
+        const avg = euPrices.avg30 != null ? "30-day average " + money(euPrices.avg30 * rate, currency) : "";
+        const label = market === "uk" ? "Estimated price (from Cardmarket)" : "Cardmarket trend";
+        info.append(priceBlock(label, euPrices.trendPrice * rate, currency, avg));
+        foundPrice = true;
+      }
+    }
+
+    if (!foundPrice) info.append(el("p", "No price available for this card in this market.", "muted"));
+    info.append(ebayLink(card, market));
+
+    row.append(image, info);
+    return row;
+  }
+
+  // Redraws every result for the chosen market.
+  function showResults() {
+    const market = currentMarket();
+    updateNote(market);
+    results.replaceChildren();
+    lastCards.forEach((card) => results.append(renderCard(card, market)));
+  }
+
+  // This runs when you tap UK, EU or US.
+  form.addEventListener("change", async (event) => {
+    if (event.target.name !== "market") return;
+    if (currentMarket() === "uk" && !eurToGbp) await loadRate();
+    showResults();
+  });
+
+  // This runs every time you tap "Look up value".
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault(); // stops the page from reloading when the form is sent
+
+    // Clean up what you typed: remove quote marks, and keep only the part of "4/102" before the slash.
+    const name = nameInput.value.replace(/["\\]/g, "").trim();
+    const number = numberInput.value.split("/")[0].replace(/[^A-Za-z0-9-]/g, "");
+    if (!name) {
+      statusLine.textContent = "Enter a card name to search.";
+      return;
+    }
+
+    // Build the question we ask the price service, for example: name:"Charizard" number:4
+    let query = 'name:"' + name + '"';
+    if (number) query += " number:" + number;
+    const url = "https://api.pokemontcg.io/v2/cards?pageSize=12&orderBy=-set.releaseDate&q=" +
+      encodeURIComponent(query);
+
+    results.replaceChildren(); // clear old results
+    lastCards = [];
+    statusLine.textContent = "Searching…";
+
+    try {
+      // fetch() sends the question over the internet and waits for the answer.
+      const response = await fetch(url, { headers: API_KEY ? { "X-Api-Key": API_KEY } : {} });
+
+      if (response.status === 429) {
+        statusLine.textContent = "Too many searches right now. Wait a minute, or add a free API key at the top of the script.";
+        return;
+      }
+      if (!response.ok) throw new Error("Unexpected response: " + response.status);
+
+      const data = await response.json();
+      const cards = data.data;
+
+      if (cards.length === 0) {
+        statusLine.textContent = "No cards found. Check the spelling or clear the number.";
+        return;
+      }
+      statusLine.textContent = "Showing " + cards.length + " newest matches.";
+      lastCards = cards;
+      if (currentMarket() === "uk" && !eurToGbp) await loadRate();
+      showResults();
+    } catch (error) {
+      statusLine.textContent = "Couldn’t reach the price service. Check your connection and try again.";
+    }
+  });
+
+  // When the page opens: show the market note and fetch the exchange rate.
+  updateNote(currentMarket());
+  loadRate().then(() => updateNote(currentMarket()));
+</script>
+</body>
+</html>
