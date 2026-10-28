@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  CARD VALUE FINDER, STAGE 1
+  CARD VALUE FINDER, STAGE 2
   This one file is the whole app. It has three parts:
     1. HTML  (between <body> and </body>)  = what is on the page
     2. CSS   (inside <style>)              = how it looks
@@ -69,6 +69,27 @@
 
   #status { min-height: 1.5em; color: var(--muted); }
 
+  /* The UK / EU / US picker: three big tap targets that work as one switch. */
+  .field-label { margin: 0 0 4px; font-weight: 600; font-size: 0.95rem; }
+  .market { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .market label {
+    position: relative; display: block; text-align: center;
+    padding: 12px 8px; min-height: 48px; cursor: pointer;
+    border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+  }
+  .market input { position: absolute; opacity: 0; pointer-events: none; }
+  .market label:has(input:checked) { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .market label:has(input:focus-visible) { outline: 3px solid var(--ink); outline-offset: 2px; }
+  .scan { margin-bottom: 20px; }
+  .scan-button {
+    position: relative; display: flex; align-items: center; justify-content: center;
+    min-height: 52px; border: 2px solid var(--ink); border-radius: 8px; cursor: pointer;
+  }
+  .scan-button input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  .scan-button:has(input:focus-visible) { outline: 3px solid var(--ink); outline-offset: 2px; }
+  .scan .muted { margin-top: 8px; }
+  .ebay-link { display: inline-block; margin-top: 12px; font-size: 0.9rem; color: var(--ink); }
+
   /* Each result is a row: picture on the left, details on the right. */
   .card {
     display: grid; grid-template-columns: 110px 1fr; gap: 14px;
@@ -92,16 +113,32 @@
 <body>
 <main>
   <h1>Card value finder</h1>
-  <p class="lede">Search a Pokémon card to see its recent market price.</p>
+  <p class="lede">Scan or search a Pokémon card to see its recent market price.</p>
+
+  <!-- STAGE 2: tap this to take or choose a photo of a card. The text reader runs in your browser. -->
+  <div class="scan">
+    <label class="scan-button">Scan a card with your camera
+      <input id="card-photo" type="file" accept="image/*">
+    </label>
+    <p class="muted">Fill the frame with the card, upright and flat, with no glare. The boxes below show what was read, so you can correct them and search again.</p>
+  </div>
 
   <!-- The search form. Each <input> is a box you type in. -->
   <form id="search-form">
     <label>Card name
-      <input id="card-name" type="text" placeholder="Charizard" autocomplete="off" required>
+      <input id="card-name" type="text" placeholder="Charizard" autocomplete="off">
     </label>
-    <label>Card number (optional, narrows the search)
+    <label>Card number (optional, like 4/102)
       <input id="card-number" type="text" placeholder="4 or 4/102" autocomplete="off">
     </label>
+    <div>
+      <p class="field-label">Market and currency</p>
+      <div class="market" role="radiogroup" aria-label="Market and currency">
+        <label><input type="radio" name="market" value="uk" checked> UK (£)</label>
+        <label><input type="radio" name="market" value="eu"> EU (€)</label>
+        <label><input type="radio" name="market" value="us"> US ($)</label>
+      </div>
+    </div>
     <button type="submit">Look up value</button>
   </form>
 
@@ -109,11 +146,15 @@
   <p id="status" role="status"></p>
   <section id="results"></section>
 
+  <p id="market-note" class="note"></p>
   <p class="note">
-    Prices are estimates from TCGplayer (US dollars) and Cardmarket (euros).
+    Prices are estimates from TCGplayer and Cardmarket.
     Condition, edition, and grading can change what a card really sells for.
   </p>
 </main>
+
+<!-- The free Tesseract.js library, which reads text from images. -->
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 
 <script>
   // OPTIONAL: paste a free key from https://dev.pokemontcg.io between the quotes.
@@ -127,6 +168,14 @@
   const numberInput = document.getElementById("card-number");
   const statusLine = document.getElementById("status");
   const results = document.getElementById("results");
+  const marketNote = document.getElementById("market-note");
+  const photoInput = document.getElementById("card-photo");
+
+  // The page remembers the last search, so switching UK / EU / US can redraw it
+  // without searching again.
+  let lastCards = [];
+  // The euro-to-pound exchange rate. loadRate() fills this in.
+  let eurToGbp = null;
 
   // Small helper: makes a page element (like a paragraph) with some text and a style class.
   function el(tag, text, className) {
@@ -136,9 +185,10 @@
     return element;
   }
 
-  // Turns a number like 12.5 into "$12.50" (or "€12.50" for euros).
+  // Turns a number like 12.5 into "$12.50", "€12.50" or "£12.50".
+  const LOCALES = { USD: "en-US", EUR: "en-IE", GBP: "en-GB" };
   function money(value, currency) {
-    return new Intl.NumberFormat("en-US", { style: "currency", currency: currency }).format(value);
+    return new Intl.NumberFormat(LOCALES[currency], { style: "currency", currency: currency }).format(value);
   }
 
   // The price service names card finishes in code-style words. This translates them.
@@ -150,6 +200,37 @@
     "1stEditionHolofoil": "1st edition holofoil",
     unlimitedHolofoil: "Unlimited holofoil"
   };
+
+  // Which market is selected: "uk", "eu" or "us".
+  function currentMarket() {
+    return document.querySelector('input[name="market"]:checked').value;
+  }
+
+  // Asks a free exchange-rate service (European Central Bank data, no key needed)
+  // for today's euro-to-pound rate. If it fails, the rate stays empty.
+  async function loadRate() {
+    try {
+      const response = await fetch("https://api.frankfurter.dev/v1/latest?base=EUR&symbols=GBP");
+      const data = await response.json();
+      eurToGbp = data.rates.GBP;
+    } catch (error) {
+      eurToGbp = null;
+    }
+  }
+
+  // Writes the explanation of the chosen market under the search form.
+  function updateNote(market) {
+    if (market === "us") {
+      marketNote.textContent = "US view: TCGplayer market price in dollars, based on recent US sales.";
+    } else if (market === "eu") {
+      marketNote.textContent = "EU view: Cardmarket trend price in euros, from European sales.";
+    } else if (eurToGbp) {
+      marketNote.textContent = "UK view: Cardmarket’s European price converted to pounds at today’s rate (€1 = £" +
+        eurToGbp.toFixed(3) + "). This is an estimate, not actual UK sales. Use the eBay link on each card to check real UK sold listings.";
+    } else {
+      marketNote.textContent = "The UK view needs an exchange rate, and it didn’t load. Check your connection and switch markets to try again.";
+    }
+  }
 
   // Builds one price block, such as "Holofoil / $350.00 / low $200.00 to high $900.00".
   function priceBlock(label, value, currency, rangeText) {
@@ -163,8 +244,19 @@
     return block;
   }
 
-  // Builds the whole row for one card.
-  function renderCard(card) {
+  // A link that opens eBay's list of sold copies of this card, on the site for the chosen market.
+  function ebayLink(card, market) {
+    const sites = { uk: ["www.ebay.co.uk", "eBay UK"], eu: ["www.ebay.de", "eBay Germany"], us: ["www.ebay.com", "eBay US"] };
+    const search = card.name + " " + card.number + "/" + card.set.printedTotal + " pokemon";
+    const link = el("a", "See sold listings on " + sites[market][1], "ebay-link");
+    link.href = "https://" + sites[market][0] + "/sch/i.html?_nkw=" + encodeURIComponent(search) + "&LH_Sold=1&LH_Complete=1";
+    link.target = "_blank";
+    link.rel = "noopener";
+    return link;
+  }
+
+  // Builds the whole row for one card, using the chosen market.
+  function renderCard(card, market) {
     const row = el("article", "", "card");
 
     const image = document.createElement("img");
@@ -178,80 +270,220 @@
     info.append(el("p", "Number " + card.number + " of " + card.set.printedTotal, "muted"));
     if (card.rarity) info.append(el("p", card.rarity, "muted"));
 
-    // TCGplayer gives one price per finish (normal, holofoil, and so on).
-    // "market" is its estimate based on recent sales. If missing, we fall back to "mid".
-    const usPrices = card.tcgplayer && card.tcgplayer.prices;
     let foundPrice = false;
-    if (usPrices) {
-      for (const [variant, p] of Object.entries(usPrices)) {
-        const value = p.market != null ? p.market : p.mid;
-        if (value == null) continue;
-        const range = (p.low != null && p.high != null)
-          ? "low " + money(p.low, "USD") + " to high " + money(p.high, "USD")
-          : "";
-        info.append(priceBlock(VARIANT_NAMES[variant] || variant, value, "USD", range));
+
+    if (market === "us") {
+      // TCGplayer gives one price per finish (normal, holofoil, and so on), in dollars.
+      // "market" is its estimate based on recent sales. If missing, we fall back to "mid".
+      const usPrices = card.tcgplayer && card.tcgplayer.prices;
+      if (usPrices) {
+        for (const [variant, p] of Object.entries(usPrices)) {
+          const value = p.market != null ? p.market : p.mid;
+          if (value == null) continue;
+          const range = (p.low != null && p.high != null)
+            ? "low " + money(p.low, "USD") + " to high " + money(p.high, "USD")
+            : "";
+          info.append(priceBlock(VARIANT_NAMES[variant] || variant, value, "USD", range));
+          foundPrice = true;
+        }
+      }
+    } else {
+      // Cardmarket (Europe) gives a "trend" price in euros.
+      // The EU view shows it as is. The UK view multiplies it by the exchange rate to get pounds.
+      const euPrices = card.cardmarket && card.cardmarket.prices;
+      const currency = market === "uk" ? "GBP" : "EUR";
+      const rate = market === "uk" ? eurToGbp : 1;
+      if (euPrices && euPrices.trendPrice != null && rate) {
+        const avg = euPrices.avg30 != null ? "30-day average " + money(euPrices.avg30 * rate, currency) : "";
+        const label = market === "uk" ? "Estimated price (from Cardmarket)" : "Cardmarket trend";
+        info.append(priceBlock(label, euPrices.trendPrice * rate, currency, avg));
         foundPrice = true;
       }
     }
 
-    // Cardmarket (Europe) gives a "trend" price in euros.
-    const euPrices = card.cardmarket && card.cardmarket.prices;
-    if (euPrices && euPrices.trendPrice != null) {
-      const avg = euPrices.avg30 != null ? "30-day average " + money(euPrices.avg30, "EUR") : "";
-      info.append(priceBlock("Cardmarket trend", euPrices.trendPrice, "EUR", avg));
-      foundPrice = true;
-    }
-
-    if (!foundPrice) info.append(el("p", "No price data for this card yet.", "muted"));
+    if (!foundPrice) info.append(el("p", "No price available for this card in this market.", "muted"));
+    info.append(ebayLink(card, market));
 
     row.append(image, info);
     return row;
   }
 
-  // This runs every time you tap "Look up value".
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault(); // stops the page from reloading when the form is sent
+  // Redraws every result for the chosen market.
+  function showResults() {
+    const market = currentMarket();
+    updateNote(market);
+    results.replaceChildren();
+    lastCards.forEach((card) => results.append(renderCard(card, market)));
+  }
 
-    // Clean up what you typed: remove quote marks, and keep only the part of "4/102" before the slash.
+  // This runs when you tap UK, EU or US.
+  form.addEventListener("change", async (event) => {
+    if (event.target.name !== "market") return;
+    if (currentMarket() === "uk" && !eurToGbp) await loadRate();
+    showResults();
+  });
+
+  // Builds a list of questions to try, from most specific to least specific.
+  // Card numbers are sometimes stored with extra zeros (4, 04 or 004), so we try each.
+  function buildQueries(name, number, total) {
+    const numbers = number ? [...new Set([number, number.padStart(2, "0"), number.padStart(3, "0")])] : [""];
+    const queries = [];
+    for (const useName of [true, false]) {
+      if (!useName && !total) continue; // a number alone would match hundreds of cards
+      for (const n of numbers) {
+        const parts = [];
+        if (useName && name) parts.push('name:"' + name + '"');
+        if (n) parts.push("number:" + n);
+        if (total) parts.push("set.printedTotal:" + total);
+        const query = parts.join(" ");
+        if (parts.length && !queries.includes(query)) queries.push(query);
+      }
+    }
+    // Last resort: just the name, in case the number was misread.
+    const nameOnly = 'name:"' + name + '"';
+    if (name && !queries.includes(nameOnly)) queries.push(nameOnly);
+    return queries;
+  }
+
+  // Looks up the cards typed into the boxes. Both "Look up value" and the camera use this.
+  async function runSearch() {
+    // Clean up what you typed: remove quote marks, and split "4/102" into the number and the set size.
     const name = nameInput.value.replace(/["\\]/g, "").trim();
-    const number = numberInput.value.split("/")[0].replace(/[^A-Za-z0-9-]/g, "");
-    if (!name) {
-      statusLine.textContent = "Enter a card name to search.";
+    const [rawNumber, rawTotal] = numberInput.value.split("/");
+    const number = rawNumber.replace(/[^A-Za-z0-9-]/g, "").replace(/^0+(?=\d)/, "");
+    const total = (rawTotal || "").replace(/\D/g, "").replace(/^0+(?=\d)/, "");
+
+    if (!name && !(number && total)) {
+      statusLine.textContent = "Enter a card name, or a number like 4/102.";
       return;
     }
 
-    // Build the question we ask the price service, for example: name:"Charizard" number:4
-    let query = 'name:"' + name + '"';
-    if (number) query += " number:" + number;
-    const url = "https://api.pokemontcg.io/v2/cards?pageSize=12&orderBy=-set.releaseDate&q=" +
-      encodeURIComponent(query);
-
     results.replaceChildren(); // clear old results
+    lastCards = [];
     statusLine.textContent = "Searching…";
 
     try {
-      // fetch() sends the question over the internet and waits for the answer.
-      const response = await fetch(url, { headers: API_KEY ? { "X-Api-Key": API_KEY } : {} });
-
-      if (response.status === 429) {
-        statusLine.textContent = "Too many searches right now. Wait a minute, or add a free API key at the top of the script.";
-        return;
+      let cards = [];
+      let usedQuery = "";
+      let sawError = false;
+      for (const query of buildQueries(name, number, total)) {
+        const url = "https://api.pokemontcg.io/v2/cards?pageSize=12&orderBy=-set.releaseDate&q=" +
+          encodeURIComponent(query);
+        // fetch() sends the question over the internet and waits for the answer.
+        const response = await fetch(url, { headers: API_KEY ? { "X-Api-Key": API_KEY } : {} });
+        if (response.status === 429) {
+          statusLine.textContent = "Too many searches right now. Wait a minute, or add a free API key at the top of the script.";
+          return;
+        }
+        if (!response.ok) { sawError = true; continue; }
+        const data = await response.json();
+        if (data.data.length > 0) { cards = data.data; usedQuery = query; break; }
       }
-      if (!response.ok) throw new Error("Unexpected response: " + response.status);
-
-      const data = await response.json();
-      const cards = data.data;
 
       if (cards.length === 0) {
-        statusLine.textContent = "No cards found. Check the spelling or clear the number.";
+        statusLine.textContent = sawError
+          ? "The price service had a problem. Try again in a moment."
+          : "No cards found. Check the spelling or clear the number.";
         return;
       }
-      statusLine.textContent = "Showing " + cards.length + " newest matches.";
-      cards.forEach((card) => results.append(renderCard(card)));
+      const nameOnly = usedQuery === 'name:"' + name + '"' && (number || total);
+      statusLine.textContent = nameOnly
+        ? "No exact match for that number, so these are cards with that name."
+        : "Showing " + cards.length + " newest matches.";
+      lastCards = cards;
+      if (currentMarket() === "uk" && !eurToGbp) await loadRate();
+      showResults();
     } catch (error) {
       statusLine.textContent = "Couldn’t reach the price service. Check your connection and try again.";
     }
+  }
+
+  // This runs every time you tap "Look up value".
+  form.addEventListener("submit", (event) => {
+    event.preventDefault(); // stops the page from reloading when the form is sent
+    runSearch();
   });
+
+  // ---------- STAGE 2: reading a card from a photo ----------
+
+  // Loads the chosen photo so we can look at its pixels.
+  function loadImage(file) {
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = reject;
+      image.src = URL.createObjectURL(file);
+    });
+  }
+
+  // Copies one rectangle of the photo onto a hidden canvas, in black and white with extra contrast,
+  // which helps the text reader. The four numbers are fractions of the photo:
+  // how far across and down the rectangle starts, then its width and height (1 = the whole photo).
+  function cropPhoto(image, left, top, width, height) {
+    const sx = image.naturalWidth * left, sy = image.naturalHeight * top;
+    const sw = image.naturalWidth * width, sh = image.naturalHeight * height;
+    const scale = Math.min(1, 1400 / sw); // shrink very large photos so reading is quicker
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(sw * scale);
+    canvas.height = Math.round(sh * scale);
+    const ctx = canvas.getContext("2d");
+    ctx.filter = "grayscale(1) contrast(1.4)";
+    ctx.drawImage(image, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+    return canvas;
+  }
+
+  // The name strip also picks up "BASIC", "STAGE 1" and the HP number. This removes them
+  // and any stray symbols, leaving just the name.
+  function cleanName(text) {
+    return text
+      .replace(/\bHP\s*\d*/gi, " ")
+      .replace(/\b(BASIC|STAGE\s*[12]|POK[EÉ]MON)\b/gi, " ")
+      .replace(/[^A-Za-zÀ-ÿ'’.\- ]/g, " ")
+      .split(/\s+/)
+      .filter((word) => word.length > 1)
+      .join(" ");
+  }
+
+  // This runs when you pick or take a photo.
+  photoInput.addEventListener("change", async () => {
+    const file = photoInput.files[0];
+    if (!file) return;
+    results.replaceChildren();
+    statusLine.textContent = "Reading the card… the first scan downloads the text reader and can take a minute.";
+
+    let worker;
+    try {
+      const image = await loadImage(file);
+      worker = await Tesseract.createWorker("eng");
+
+      // The set number (like 4/102) is printed along the bottom edge. Read the whole strip.
+      await worker.setParameters({ tessedit_pageseg_mode: "11" });
+      const bottom = await worker.recognize(cropPhoto(image, 0, 0.88, 1, 0.12));
+      // The name is in the top-left. Read it as a single line of text.
+      await worker.setParameters({ tessedit_pageseg_mode: "7" });
+      const top = await worker.recognize(cropPhoto(image, 0.05, 0.03, 0.68, 0.085));
+
+      const match = bottom.data.text.match(/(\d{1,3})\s*[\/|\\]\s*(\d{1,3})/);
+      const name = cleanName(top.data.text);
+      if (!match && name.length < 3) {
+        statusLine.textContent = "Couldn’t read that photo. Try again with the card filling the frame, upright, flat and without glare, or type it in.";
+        return;
+      }
+      // Fill in the boxes so you can see (and fix) what was read, then search.
+      nameInput.value = name;
+      numberInput.value = match ? match[1] + "/" + match[2] : "";
+      await runSearch();
+    } catch (error) {
+      statusLine.textContent = "Couldn’t read that photo. Check your connection, then try again or type the card in.";
+    } finally {
+      if (worker) await worker.terminate();
+      photoInput.value = ""; // lets you scan the same card again
+    }
+  });
+
+  // When the page opens: show the market note and fetch the exchange rate.
+  updateNote(currentMarket());
+  loadRate().then(() => updateNote(currentMarket()));
 </script>
 </body>
 </html>
