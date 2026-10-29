@@ -100,6 +100,17 @@
   .summary .warn { margin: 12px 0 0; font-size: 0.9rem; }
   .summary details { margin-top: 12px; font-size: 0.85rem; color: var(--muted); }
   .summary pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.75rem; max-height: 14em; overflow: auto; }
+  /* The Standard / Holo / Reverse holo picker on each result. */
+  .finish { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .finish-label { margin-top: 10px; }
+  .finish-option {
+    position: relative; display: block; padding: 8px 12px; min-height: 40px; cursor: pointer;
+    border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+    font-size: 0.9rem; font-weight: 600;
+  }
+  .finish-option input { position: absolute; opacity: 0; pointer-events: none; }
+  .finish-option:has(input:checked) { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .finish-option:has(input:focus-visible) { outline: 3px solid var(--ink); outline-offset: 2px; }
   .set-line { display: flex; align-items: center; gap: 6px; }
   .card .set-symbol { width: auto; height: 18px; flex: none; }
   .card.best { border: 2px solid var(--ink); }
@@ -202,6 +213,8 @@
   let eurToGbp = null;
   // True when one result clearly fits the photo better than the rest.
   let bestIsClear = false;
+  // Which finish (Standard, Holo, Reverse holo...) is chosen for each card, by card id.
+  const finishChoice = {};
 
   // Small helper: makes a page element (like a paragraph) with some text and a style class.
   function el(tag, text, className) {
@@ -278,7 +291,39 @@
     return link;
   }
 
-  // Builds the whole row for one card, using the chosen market.
+  // The finishes a card comes in, as keys like "normal", "holofoil" and "reverseHolofoil".
+  // TCGplayer lists each finish it has prices for. Cardmarket only separates out reverse holo.
+  function finishKeys(card) {
+    const keys = [];
+    const us = card.tcgplayer && card.tcgplayer.prices;
+    if (us) keys.push(...Object.keys(us));
+    const eu = card.cardmarket && card.cardmarket.prices;
+    if (eu && eu.reverseHoloTrend > 0 && !keys.includes("reverseHolofoil")) keys.push("reverseHolofoil");
+    if (keys.length === 0 && eu && eu.trendPrice != null) keys.push("normal"); // only one general price exists
+    return keys;
+  }
+
+  // A row of tap-to-select options (Standard, Holo, Reverse holo...). Only one can be chosen at a time.
+  // Choosing one calls onPick, which redraws the card with that finish's prices.
+  function finishPicker(card, keys, chosen, onPick) {
+    const wrap = el("div", "", "finish");
+    wrap.setAttribute("role", "radiogroup");
+    wrap.setAttribute("aria-label", "Card finish");
+    for (const key of keys) {
+      const label = el("label", "", "finish-option");
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.name = "finish-" + card.id;
+      input.value = key;
+      input.checked = key === chosen;
+      input.addEventListener("change", () => onPick(key));
+      label.append(input, VARIANT_NAMES[key] || key);
+      wrap.append(label);
+    }
+    return wrap;
+  }
+
+  // Builds the whole row for one card, using the chosen market and the chosen finish.
   function renderCard(card, market, isBest) {
     const row = el("article", "", "card");
 
@@ -304,42 +349,56 @@
     info.append(el("p", "Number " + card.number + " of " + card.set.printedTotal, "muted"));
     if (card.rarity) info.append(el("p", card.rarity, "muted"));
 
-    let foundPrice = false;
+    // Which finish is selected. The page remembers the choice for each card.
+    const keys = finishKeys(card);
+    const chosen = keys.includes(finishChoice[card.id]) ? finishChoice[card.id] : keys[0];
+    if (keys.length > 1) {
+      info.append(el("p", "Finish (pick yours)", "price-label finish-label"));
+      info.append(finishPicker(card, keys, chosen, (key) => {
+        finishChoice[card.id] = key;
+        row.replaceWith(renderCard(card, currentMarket(), isBest)); // redraw just this card
+      }));
+    }
 
-    if (market === "us") {
-      // TCGplayer gives one price per finish (normal, holofoil, and so on), in dollars.
-      // "market" is its estimate based on recent sales. If missing, we fall back to "mid".
-      const usPrices = card.tcgplayer && card.tcgplayer.prices;
-      if (usPrices) {
-        for (const [variant, p] of Object.entries(usPrices)) {
-          const value = p.market != null ? p.market : p.mid;
-          if (value == null) continue;
-          const range = (p.low != null && p.high != null)
-            ? "low " + money(p.low, "USD") + " to high " + money(p.high, "USD")
-            : "";
-          info.append(priceBlock(VARIANT_NAMES[variant] || variant, value, "USD", range));
-          foundPrice = true;
-        }
+    let foundPrice = false;
+    const finishName = VARIANT_NAMES[chosen] || chosen;
+
+    if (chosen && market === "us") {
+      // TCGplayer's "market" price is its estimate based on recent sales, in dollars. If missing, we use "mid".
+      const p = card.tcgplayer && card.tcgplayer.prices && card.tcgplayer.prices[chosen];
+      const value = p ? (p.market != null ? p.market : p.mid) : null;
+      if (value != null) {
+        const range = (p.low != null && p.high != null)
+          ? "low " + money(p.low, "USD") + " to high " + money(p.high, "USD")
+          : "";
+        info.append(priceBlock(finishName + " (TCGplayer market price)", value, "USD", range));
+        foundPrice = true;
       }
-    } else {
-      // Cardmarket (Europe) gives a "trend" price in euros.
+    } else if (chosen) {
+      // Cardmarket (Europe) gives a "trend" price in euros, with a separate one for reverse holo.
       // The EU view shows it as is. The UK view multiplies it by the exchange rate to get pounds.
-      const euPrices = card.cardmarket && card.cardmarket.prices;
+      const eu = card.cardmarket && card.cardmarket.prices;
       const currency = market === "uk" ? "GBP" : "EUR";
       const rate = market === "uk" ? eurToGbp : 1;
-      if (euPrices && euPrices.trendPrice != null && rate) {
-        const avg = euPrices.avg30 != null ? "30-day average " + money(euPrices.avg30 * rate, currency) : "";
-        const label = market === "uk" ? "Estimated trend price (Cardmarket)" : "Cardmarket trend";
-        info.append(priceBlock(label, euPrices.trendPrice * rate, currency, avg));
-        foundPrice = true;
-        if (euPrices.reverseHoloTrend > 0) {
-          const revAvg = euPrices.reverseHoloAvg30 > 0 ? "30-day average " + money(euPrices.reverseHoloAvg30 * rate, currency) : "";
-          info.append(priceBlock("Reverse holo trend price (Cardmarket)", euPrices.reverseHoloTrend * rate, currency, revAvg));
+      const reverse = chosen === "reverseHolofoil";
+      const trend = eu ? (reverse ? eu.reverseHoloTrend : eu.trendPrice) : 0;
+      const avg30 = eu ? (reverse ? eu.reverseHoloAvg30 : eu.avg30) : 0;
+      if (trend > 0 && rate) {
+        const avg = avg30 > 0 ? "30-day average " + money(avg30 * rate, currency) : "";
+        const label = finishName + (market === "uk" ? " (estimated from Cardmarket trend)" : " (Cardmarket trend)");
+        info.append(priceBlock(label, trend * rate, currency, avg));
+        if (/^(1stEdition|unlimited)/.test(chosen)) {
+          info.append(el("p", "Cardmarket doesn’t price this edition separately, so this is its general price.", "muted"));
         }
+        foundPrice = true;
       }
     }
 
-    if (!foundPrice) info.append(el("p", "No price available for this card in this market.", "muted"));
+    if (!foundPrice) {
+      info.append(el("p", market === "uk" && !eurToGbp
+        ? "The exchange rate didn’t load. Try the EU view."
+        : "No price listed for this finish in this market.", "muted"));
+    }
     info.append(ebayLink(card, market));
 
     row.append(image, info);
@@ -733,14 +792,9 @@
     return best;
   }
 
-  // The finishes this card comes in, from the price service (Standard, Holo, Reverse holo...).
+  // The finishes this card comes in, as plain words (Standard, Holo, Reverse holo...).
   function finishesOf(card) {
-    const names = [];
-    const prices = card.tcgplayer && card.tcgplayer.prices;
-    if (prices) for (const key of Object.keys(prices)) names.push(VARIANT_NAMES[key] || key);
-    const eu = card.cardmarket && card.cardmarket.prices;
-    if (eu && eu.reverseHoloTrend > 0 && !names.includes("Reverse holo")) names.push("Reverse holo");
-    return names.join(", ");
+    return finishKeys(card).map((key) => VARIANT_NAMES[key] || key).join(", ");
   }
 
   // Shows what the scan found: the details of the best-matching card, with a note on each saying
@@ -764,7 +818,7 @@
     row("Name", card ? card.name : clues.name,
       clues.name ? (card && clues.name.toLowerCase() !== card.name.toLowerCase() ? "photo read: “" + clues.name + "”" : "read from photo") : readNote(card && card.name, ""));
     row("Type", card ? finishesOf(card) : "",
-      card ? "finishes this card comes in. Holo can’t be detected from a photo, so pick yours" : "");
+      card ? "finishes this card comes in. A photo can’t show which yours is, so pick it on the card below" : "");
     row("Number", card ? card.number + "/" + card.set.printedTotal : clues.numberText, readNote(card ? "x" : "", clues.numberText));
     row("Rarity", card ? card.rarity : (clues.shape ? shapeRarity[clues.shape] : ""),
       clues.shape ? "photo shape: " + clues.shape : (card ? "from the matched card" : ""));
