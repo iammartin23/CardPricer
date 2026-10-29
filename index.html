@@ -81,6 +81,7 @@
   .market label:has(input:checked) { background: var(--ink); color: var(--paper); border-color: var(--ink); }
   .market label:has(input:focus-visible) { outline: 3px solid var(--ink); outline-offset: 2px; }
   .scan { margin-bottom: 20px; }
+  .scan-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .scan-button {
     position: relative; display: flex; align-items: center; justify-content: center;
     min-height: 52px; border: 2px solid var(--ink); border-radius: 8px; cursor: pointer;
@@ -115,11 +116,16 @@
   <h1>Card value finder</h1>
   <p class="lede">Scan or search a Pokémon card to see its recent market price.</p>
 
-  <!-- STAGE 2: tap this to take or choose a photo of a card. The text reader runs in your browser. -->
+  <!-- STAGE 2: "capture" makes the first button open your camera. The second lets you pick an existing photo. -->
   <div class="scan">
-    <label class="scan-button">Scan a card with your camera
-      <input id="card-photo" type="file" accept="image/*">
-    </label>
+    <div class="scan-buttons">
+      <label class="scan-button">Take a photo
+        <input class="photo-input" type="file" accept="image/*" capture="environment">
+      </label>
+      <label class="scan-button">Choose a photo
+        <input class="photo-input" type="file" accept="image/*">
+      </label>
+    </div>
     <p class="muted">Fill the frame with the card, upright and flat, with no glare. The boxes below show what was read, so you can correct them and search again.</p>
   </div>
 
@@ -169,7 +175,7 @@
   const statusLine = document.getElementById("status");
   const results = document.getElementById("results");
   const marketNote = document.getElementById("market-note");
-  const photoInput = document.getElementById("card-photo");
+  const photoInputs = document.querySelectorAll(".photo-input");
 
   // The page remembers the last search, so switching UK / EU / US can redraw it
   // without searching again.
@@ -391,6 +397,8 @@
         ? "No exact match for that number, so these are cards with that name."
         : "Showing " + cards.length + " newest matches.";
       lastCards = cards;
+      // If every match has the same name, show its proper full name in the box.
+      if (cards.every((card) => card.name === cards[0].name)) nameInput.value = cards[0].name;
       if (currentMarket() === "uk" && !eurToGbp) await loadRate();
       showResults();
     } catch (error) {
@@ -440,13 +448,22 @@
       .replace(/\b(BASIC|STAGE\s*[12]|POK[EÉ]MON)\b/gi, " ")
       .replace(/[^A-Za-zÀ-ÿ'’.\- ]/g, " ")
       .split(/\s+/)
-      .filter((word) => word.length > 1)
+      .filter((word) => word.length > 1 || /^[VMXGN]$/.test(word))
       .join(" ");
   }
 
-  // This runs when you pick or take a photo.
-  photoInput.addEventListener("change", async () => {
-    const file = photoInput.files[0];
+  // From everything read at the top of the card, picks the first line that looks like a name.
+  function pickName(text) {
+    for (const line of text.split("\n")) {
+      const name = cleanName(line);
+      if (name.length >= 3 && !/^(evolves|put)\b/i.test(name)) return name;
+    }
+    return "";
+  }
+
+  // This runs when you take or pick a photo (both buttons use it).
+  async function readPhoto(input) {
+    const file = input.files[0];
     if (!file) return;
     results.replaceChildren();
     statusLine.textContent = "Reading the card… the first scan downloads the text reader and can take a minute.";
@@ -455,16 +472,16 @@
     try {
       const image = await loadImage(file);
       worker = await Tesseract.createWorker("eng");
+      // "Sparse text" mode finds words scattered around the image instead of expecting a page of text.
+      await worker.setParameters({ tessedit_pageseg_mode: "11" });
 
       // The set number (like 4/102) is printed along the bottom edge. Read the whole strip.
-      await worker.setParameters({ tessedit_pageseg_mode: "11" });
       const bottom = await worker.recognize(cropPhoto(image, 0, 0.88, 1, 0.12));
-      // The name is in the top-left. Read it as a single line of text.
-      await worker.setParameters({ tessedit_pageseg_mode: "7" });
-      const top = await worker.recognize(cropPhoto(image, 0.05, 0.03, 0.68, 0.085));
+      // The name is somewhere in the top quarter. Read it all, then pick the first line that looks like a name.
+      const top = await worker.recognize(cropPhoto(image, 0, 0, 1, 0.26));
 
       const match = bottom.data.text.match(/(\d{1,3})\s*[\/|\\]\s*(\d{1,3})/);
-      const name = cleanName(top.data.text);
+      const name = pickName(top.data.text);
       if (!match && name.length < 3) {
         statusLine.textContent = "Couldn’t read that photo. Try again with the card filling the frame, upright, flat and without glare, or type it in.";
         return;
@@ -477,9 +494,10 @@
       statusLine.textContent = "Couldn’t read that photo. Check your connection, then try again or type the card in.";
     } finally {
       if (worker) await worker.terminate();
-      photoInput.value = ""; // lets you scan the same card again
+      input.value = ""; // lets you scan the same card again
     }
-  });
+  }
+  photoInputs.forEach((input) => input.addEventListener("change", () => readPhoto(input)));
 
   // When the page opens: show the market note and fetch the exchange rate.
   updateNote(currentMarket());
