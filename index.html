@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  CARD VALUE FINDER, STAGE 2
+  CARD VALUE FINDER, STAGE 2 (camera, with number, shape and year clues)
   This one file is the whole app. It has three parts:
     1. HTML  (between <body> and </body>)  = what is on the page
     2. CSS   (inside <style>)              = how it looks
@@ -89,6 +89,10 @@
   .scan-button input { position: absolute; opacity: 0; width: 1px; height: 1px; }
   .scan-button:has(input:focus-visible) { outline: 3px solid var(--ink); outline-offset: 2px; }
   .scan .muted { margin-top: 8px; }
+  .set-line { display: flex; align-items: center; gap: 6px; }
+  .set-symbol { height: 18px; width: auto; }
+  .card.best { border: 2px solid var(--ink); }
+  .best-tag { display: inline-block; margin: 0 0 4px; padding: 2px 8px; border-radius: 99px; font-size: 0.8rem; font-weight: 800; background: var(--accent); color: #1b2340; }
   .ebay-link { display: inline-block; margin-top: 12px; font-size: 0.9rem; color: var(--ink); }
 
   /* Each result is a row: picture on the left, details on the right. */
@@ -182,6 +186,8 @@
   let lastCards = [];
   // The euro-to-pound exchange rate. loadRate() fills this in.
   let eurToGbp = null;
+  // True when one result clearly fits the photo better than the rest.
+  let bestIsClear = false;
 
   // Small helper: makes a page element (like a paragraph) with some text and a style class.
   function el(tag, text, className) {
@@ -262,7 +268,7 @@
   }
 
   // Builds the whole row for one card, using the chosen market.
-  function renderCard(card, market) {
+  function renderCard(card, market, isBest) {
     const row = el("article", "", "card");
 
     const image = document.createElement("img");
@@ -271,8 +277,19 @@
     image.loading = "lazy";
 
     const info = el("div");
+    if (isBest) {
+      row.classList.add("best");
+      info.append(el("p", "Best match", "best-tag"));
+    }
     info.append(el("h2", card.name));
-    info.append(el("p", card.set.name, "muted"));
+    // The set's little symbol is shown so you can compare it with the one printed on your card.
+    const setLine = el("p", "", "muted set-line");
+    const symbol = document.createElement("img");
+    symbol.src = card.set.images.symbol;
+    symbol.alt = "";
+    symbol.className = "set-symbol";
+    setLine.append(symbol, card.set.name + " (" + card.set.releaseDate.slice(0, 4) + ")");
+    info.append(setLine);
     info.append(el("p", "Number " + card.number + " of " + card.set.printedTotal, "muted"));
     if (card.rarity) info.append(el("p", card.rarity, "muted"));
 
@@ -319,7 +336,7 @@
     const market = currentMarket();
     updateNote(market);
     results.replaceChildren();
-    lastCards.forEach((card) => results.append(renderCard(card, market)));
+    lastCards.forEach((card, index) => results.append(renderCard(card, market, bestIsClear && index === 0)));
   }
 
   // This runs when you tap UK, EU or US.
@@ -331,10 +348,11 @@
 
   // Builds a list of questions to try, from most specific to least specific.
   // Card numbers are sometimes stored with extra zeros (4, 04 or 004), so we try each.
-  function buildQueries(name, number, total) {
+  // For a photo scan the name is the least trustworthy clue, so number-only questions go first.
+  function buildQueries(name, number, total, nameFirst) {
     const numbers = number ? [...new Set([number, number.padStart(2, "0"), number.padStart(3, "0")])] : [""];
     const queries = [];
-    for (const useName of [true, false]) {
+    for (const useName of nameFirst ? [true, false] : [false, true]) {
       if (!useName && !total) continue; // a number alone would match hundreds of cards
       for (const n of numbers) {
         const parts = [];
@@ -352,7 +370,8 @@
   }
 
   // Looks up the cards typed into the boxes. Both "Look up value" and the camera use this.
-  async function runSearch() {
+  // "clues" is only given after a photo scan: the name, year and shape read from the photo.
+  async function runSearch(clues) {
     // Clean up what you typed: remove quote marks, and split "4/102" into the number and the set size.
     const name = nameInput.value.replace(/["\\]/g, "").trim();
     const [rawNumber, rawTotal] = numberInput.value.split("/");
@@ -366,13 +385,14 @@
 
     results.replaceChildren(); // clear old results
     lastCards = [];
+    bestIsClear = false;
     statusLine.textContent = "Searching…";
 
     try {
       let cards = [];
       let usedQuery = "";
       let sawError = false;
-      for (const query of buildQueries(name, number, total)) {
+      for (const query of buildQueries(name, number, total, !clues)) {
         const url = "https://api.pokemontcg.io/v2/cards?pageSize=12&orderBy=-set.releaseDate&q=" +
           encodeURIComponent(query);
         // fetch() sends the question over the internet and waits for the answer.
@@ -392,13 +412,26 @@
           : "No cards found. Check the spelling or clear the number.";
         return;
       }
+
+      if (clues) {
+        // After a scan, put the best-fitting card first and show its proper name in the box.
+        cards = rankCards(cards, clues);
+        bestIsClear = cards.length === 1 || scoreCard(cards[0], clues) > scoreCard(cards[1], clues);
+        nameInput.value = cards[0].name;
+      } else if (cards.every((card) => card.name === cards[0].name)) {
+        nameInput.value = cards[0].name; // all matches share one name, so show it in full
+      }
+
       const nameOnly = usedQuery === 'name:"' + name + '"' && (number || total);
-      statusLine.textContent = nameOnly
-        ? "No exact match for that number, so these are cards with that name."
-        : "Showing " + cards.length + " newest matches.";
+      if (nameOnly) {
+        statusLine.textContent = "No exact match for that number, so these are cards with that name.";
+      } else if (clues) {
+        statusLine.textContent = "Showing " + cards.length + " matches, best first." +
+          (clues.summary ? " Read from the photo: " + clues.summary + "." : "");
+      } else {
+        statusLine.textContent = "Showing " + cards.length + " newest matches.";
+      }
       lastCards = cards;
-      // If every match has the same name, show its proper full name in the box.
-      if (cards.every((card) => card.name === cards[0].name)) nameInput.value = cards[0].name;
       if (currentMarket() === "uk" && !eurToGbp) await loadRate();
       showResults();
     } catch (error) {
@@ -440,16 +473,73 @@
     return canvas;
   }
 
-  // The name strip also picks up "BASIC", "STAGE 1" and the HP number. This removes them
+  // Counts the letter changes needed to turn one word into another (0 = identical).
+  function editDistance(a, b) {
+    const row = Array.from({ length: b.length + 1 }, (_, j) => j);
+    for (let i = 1; i <= a.length; i++) {
+      let diagonal = row[0];
+      row[0] = i;
+      for (let j = 1; j <= b.length; j++) {
+        const above = row[j];
+        row[j] = Math.min(row[j] + 1, row[j - 1] + 1, diagonal + (a[i - 1] === b[j - 1] ? 0 : 1));
+        diagonal = above;
+      }
+    }
+    return row[b.length];
+  }
+
+  // True for the label words printed beside the name (BASIC, STAGE 1), even when the
+  // text reader garbles them a little, like "BASIG" or "BAS1C".
+  function isLabelWord(word) {
+    // Misread digits are turned back into the letters they look like (1 = I, 0 = O, 5 = S).
+    const letters = word.toUpperCase().replace(/1/g, "I").replace(/0/g, "O").replace(/5/g, "S").replace(/[^A-Z]/g, "");
+    return ["BASIC", "STAGE", "POKEMON"].some((label) => editDistance(letters, label) <= (label.length > 5 ? 2 : 1));
+  }
+
+  // The name strip also picks up labels and the HP number. This removes them
   // and any stray symbols, leaving just the name.
   function cleanName(text) {
     return text
       .replace(/\bHP\s*\d*/gi, " ")
-      .replace(/\b(BASIC|STAGE\s*[12]|POK[EÉ]MON)\b/gi, " ")
+      .split(/\s+/)
+      .filter((token) => !isLabelWord(token)) // drop BASIC / STAGE labels before cleaning, while digits are still visible
+      .join(" ")
       .replace(/[^A-Za-zÀ-ÿ'’.\- ]/g, " ")
       .split(/\s+/)
       .filter((word) => word.length > 1 || /^[VMXGN]$/.test(word))
       .join(" ");
+  }
+
+  // Scores how well a card fits the clues read from the photo. More points = better fit.
+  // Name: the read name (even a partial one, like "ansage" for Pansage) appears in the card's name.
+  // Year: the © year printed on the card is close to the year its set came out.
+  // Shape: circle = Common, diamond = Uncommon, star = Rare.
+  function scoreCard(card, clues) {
+    let score = 0;
+    const cardName = card.name.toLowerCase();
+    const clue = (clues.name || "").toLowerCase();
+    if (clue.length >= 3) {
+      if (cardName.includes(clue) || clue.includes(cardName)) score += 3;
+      else if (editDistance(cardName, clue) <= 2) score += 2;
+    }
+    if (clues.year) {
+      const gap = Math.abs(Number(card.set.releaseDate.slice(0, 4)) - clues.year);
+      if (gap === 0) score += 2;
+      else if (gap === 1) score += 1;
+    }
+    const rarity = card.rarity || "";
+    if (clues.shape === "circle" && rarity === "Common") score += 2;
+    if (clues.shape === "diamond" && rarity === "Uncommon") score += 2;
+    if (clues.shape === "star" && rarity.startsWith("Rare")) score += 2;
+    return score;
+  }
+
+  // Sorts cards best fit first. Cards with equal scores keep their original (newest first) order.
+  function rankCards(cards, clues) {
+    return cards
+      .map((card, index) => ({ card: card, index: index, score: scoreCard(card, clues) }))
+      .sort((a, b) => b.score - a.score || a.index - b.index)
+      .map((entry) => entry.card);
   }
 
   // From everything read at the top of the card, picks the first line that looks like a name.
@@ -459,6 +549,84 @@
       if (name.length >= 3 && !/^(evolves|put)\b/i.test(name)) return name;
     }
     return "";
+  }
+
+  // Looks at the pixels around the card number and says what the little shape after it is:
+  // "circle" (common), "diamond" (uncommon) or "star" (rare). Gives "" if it can't tell.
+  // gray = brightness of each pixel (0 to 255), w and h = size of the area being looked at.
+  function classifyShape(gray, w, h, wordRight, wordHeight, endsWithDigit) {
+    // 1. Decide which pixels are "ink": darker than halfway between the darkest and lightest pixel.
+    let min = 255, max = 0;
+    for (const v of gray) { if (v < min) min = v; if (v > max) max = v; }
+    if (max - min < 40) return "";
+    const cut = (min + max) / 2;
+    const ink = new Uint8Array(w * h);
+    let inkCount = 0;
+    for (let i = 0; i < ink.length; i++) { if (gray[i] < cut) { ink[i] = 1; inkCount++; } }
+    if (inkCount > ink.length / 2) for (let i = 0; i < ink.length; i++) ink[i] = 1 - ink[i]; // light symbol on a dark card
+
+    // 2. Find each separate blob of ink (flood fill) and note its size.
+    const seen = new Uint8Array(w * h);
+    const blobs = [];
+    for (let start = 0; start < ink.length; start++) {
+      if (!ink[start] || seen[start]) continue;
+      const stack = [start];
+      seen[start] = 1;
+      let x0 = w, x1 = 0, y0 = h, y1 = 0, area = 0;
+      while (stack.length) {
+        const p = stack.pop();
+        const x = p % w, y = (p - x) / w;
+        area++;
+        x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+            const q = ny * w + nx;
+            if (ink[q] && !seen[q]) { seen[q] = 1; stack.push(q); }
+          }
+        }
+      }
+      blobs.push({ x: x0, w: x1 - x0 + 1, h: y1 - y0 + 1, area: area });
+    }
+
+    // 3. Keep blobs about the size of a printed character.
+    const chars = blobs.filter((b) => b.area >= 20 && b.h >= wordHeight * 0.35 && b.h <= wordHeight * 1.6);
+
+    // 4. The shape is the blob at the right-hand end of the number text.
+    let symbol;
+    if (!endsWithDigit) {
+      symbol = chars.filter((b) => b.x + b.w <= wordRight + 4).sort((a, b) => (b.x + b.w) - (a.x + a.w))[0];
+    } else {
+      symbol = chars.filter((b) => b.x >= wordRight - 2).sort((a, b) => a.x - b.x)[0];
+    }
+    if (!symbol || symbol.h < 8) return "";
+    const aspect = symbol.w / symbol.h;
+    if (aspect < 0.6 || aspect > 1.5) return "";
+
+    // 5. A circle fills most of its bounding box, a diamond about half, a star about a third.
+    const fill = symbol.area / (symbol.w * symbol.h);
+    if (fill >= 0.66) return "circle";
+    if (fill >= 0.42) return "diamond";
+    if (fill >= 0.2) return "star";
+    return "";
+  }
+
+  // Gets the canvas ready for the shape detector, using where the text reader found the number.
+  function findRarityShape(canvas, word) {
+    const b = word.bbox, pad = 3;
+    const wordHeight = b.y1 - b.y0;
+    const endsWithDigit = /\d\s*$/.test(word.text);
+    const x0 = Math.max(0, Math.floor(b.x0 - pad));
+    const y0 = Math.max(0, Math.floor(b.y0 - pad));
+    const x1 = Math.min(canvas.width, Math.ceil(b.x1 + pad + (endsWithDigit ? wordHeight * 1.5 : 0)));
+    const y1 = Math.min(canvas.height, Math.ceil(b.y1 + pad));
+    const w = x1 - x0, h = y1 - y0;
+    if (w < 10 || h < 10) return "";
+    const rgba = canvas.getContext("2d").getImageData(x0, y0, w, h).data;
+    const gray = new Uint8Array(w * h);
+    for (let i = 0; i < gray.length; i++) gray[i] = rgba[i * 4]; // the canvas is already grey, so red = brightness
+    return classifyShape(gray, w, h, b.x1 - x0, wordHeight, endsWithDigit);
   }
 
   // This runs when you take or pick a photo (both buttons use it).
@@ -475,21 +643,33 @@
       // "Sparse text" mode finds words scattered around the image instead of expecting a page of text.
       await worker.setParameters({ tessedit_pageseg_mode: "11" });
 
-      // The set number (like 4/102) is printed along the bottom edge. Read the whole strip.
-      const bottom = await worker.recognize(cropPhoto(image, 0, 0.88, 1, 0.12));
+      // The number (like 1/98), the shape after it and the © year are printed along the bottom edge.
+      // Read a thin strip first, and a taller one if the number wasn't found.
+      let bottom, bottomCanvas, match;
+      for (const [top, height] of [[0.86, 0.14], [0.78, 0.22]]) {
+        bottomCanvas = cropPhoto(image, 0, top, 1, height);
+        bottom = await worker.recognize(bottomCanvas);
+        match = bottom.data.text.match(/(\d{1,3})\s*[\/|\\]\s*(\d{1,3})/);
+        if (match) break;
+      }
+      const numberWord = (bottom.data.words || []).find((word) => /\d\s*[\/|\\]\s*\d/.test(word.text));
+      const shape = numberWord ? findRarityShape(bottomCanvas, numberWord) : "";
+      const yearMatch = bottom.data.text.match(/©\s*((?:19|20)\d\d)|((?:19|20)\d\d)\s*Pok/i);
+      const year = yearMatch ? Number(yearMatch[1] || yearMatch[2]) : 0;
+
       // The name is somewhere in the top quarter. Read it all, then pick the first line that looks like a name.
       const top = await worker.recognize(cropPhoto(image, 0, 0, 1, 0.26));
-
-      const match = bottom.data.text.match(/(\d{1,3})\s*[\/|\\]\s*(\d{1,3})/);
       const name = pickName(top.data.text);
+
       if (!match && name.length < 3) {
         statusLine.textContent = "Couldn’t read that photo. Try again with the card filling the frame, upright, flat and without glare, or type it in.";
         return;
       }
-      // Fill in the boxes so you can see (and fix) what was read, then search.
+      // Fill in the boxes so you can see (and fix) what was read, then search using all the clues.
       nameInput.value = name;
       numberInput.value = match ? match[1] + "/" + match[2] : "";
-      await runSearch();
+      const summary = [match ? match[1] + "/" + match[2] : "", shape, year ? "©" + year : ""].filter(Boolean).join(", ");
+      await runSearch({ name: name, year: year, shape: shape, summary: summary });
     } catch (error) {
       statusLine.textContent = "Couldn’t read that photo. Check your connection, then try again or type the card in.";
     } finally {
@@ -497,7 +677,7 @@
       input.value = ""; // lets you scan the same card again
     }
   }
-  photoInputs.forEach((input) => input.addEventListener("change", () => readPhoto(input)));
+    photoInputs.forEach((input) => input.addEventListener("change", () => readPhoto(input)));
 
   // When the page opens: show the market note and fetch the exchange rate.
   updateNote(currentMarket());
