@@ -89,6 +89,17 @@
   .scan-button input { position: absolute; opacity: 0; width: 1px; height: 1px; }
   .scan-button:has(input:focus-visible) { outline: 3px solid var(--ink); outline-offset: 2px; }
   .scan .muted { margin-top: 8px; }
+  /* The "What the scan found" panel. */
+  .summary { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+  .summary h2 { font-size: 1.1rem; margin: 0 0 10px; }
+  .summary-list { display: grid; grid-template-columns: auto 1fr; gap: 8px 14px; margin: 0; }
+  .summary-list dt { color: var(--muted); font-weight: 600; }
+  .summary-list dd { margin: 0; font-weight: 800; }
+  .summary-list small { display: block; font-weight: 400; font-size: 0.8rem; color: var(--muted); }
+  .summary .missing { color: var(--muted); font-style: italic; font-weight: 400; }
+  .summary .warn { margin: 12px 0 0; font-size: 0.9rem; }
+  .summary details { margin-top: 12px; font-size: 0.85rem; color: var(--muted); }
+  .summary pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.75rem; max-height: 14em; overflow: auto; }
   .set-line { display: flex; align-items: center; gap: 6px; }
   .card .set-symbol { width: auto; height: 18px; flex: none; }
   .card.best { border: 2px solid var(--ink); }
@@ -155,6 +166,7 @@
 
   <!-- The script writes messages and results into these two empty spots. -->
   <p id="status" role="status"></p>
+  <section id="scan-summary"></section>
   <section id="results"></section>
 
   <p id="market-note" class="note"></p>
@@ -180,6 +192,7 @@
   const statusLine = document.getElementById("status");
   const results = document.getElementById("results");
   const marketNote = document.getElementById("market-note");
+  const summaryBox = document.getElementById("scan-summary");
   const photoInputs = document.querySelectorAll(".photo-input");
 
   // The page remembers the last search, so switching UK / EU / US can redraw it
@@ -206,12 +219,12 @@
 
   // The price service names card finishes in code-style words. This translates them.
   const VARIANT_NAMES = {
-    normal: "Normal",
-    holofoil: "Holofoil",
-    reverseHolofoil: "Reverse holofoil",
-    "1stEditionNormal": "1st edition normal",
-    "1stEditionHolofoil": "1st edition holofoil",
-    unlimitedHolofoil: "Unlimited holofoil"
+    normal: "Standard",
+    holofoil: "Holo",
+    reverseHolofoil: "Reverse holo",
+    "1stEditionNormal": "1st edition standard",
+    "1stEditionHolofoil": "1st edition holo",
+    unlimitedHolofoil: "Unlimited holo"
   };
 
   // Which market is selected: "uk", "eu" or "us".
@@ -319,6 +332,10 @@
         const label = market === "uk" ? "Estimated trend price (Cardmarket)" : "Cardmarket trend";
         info.append(priceBlock(label, euPrices.trendPrice * rate, currency, avg));
         foundPrice = true;
+        if (euPrices.reverseHoloTrend > 0) {
+          const revAvg = euPrices.reverseHoloAvg30 > 0 ? "30-day average " + money(euPrices.reverseHoloAvg30 * rate, currency) : "";
+          info.append(priceBlock("Reverse holo trend price (Cardmarket)", euPrices.reverseHoloTrend * rate, currency, revAvg));
+        }
       }
     }
 
@@ -361,6 +378,15 @@
         if (parts.length && !queries.includes(query)) queries.push(query);
       }
     }
+    // A three-digit set size may contain a misread extra digit (like 998 for 98), so try with one digit dropped too.
+    if (total.length === 3) {
+      for (const alt of [...new Set([total.slice(1), total[0] + total[2], total.slice(0, 2)])]) {
+        for (const n of numbers) {
+          const query = "number:" + n + " set.printedTotal:" + alt;
+          if (n && !queries.includes(query)) queries.push(query);
+        }
+      }
+    }
     // Last resort: just the name, in case the number was misread.
     const nameOnly = 'name:"' + name + '"';
     if (name && !queries.includes(nameOnly)) queries.push(nameOnly);
@@ -383,6 +409,7 @@
     }
 
     results.replaceChildren(); // clear old results
+    summaryBox.replaceChildren();
     lastCards = [];
     bestIsClear = false;
     statusLine.textContent = "Searching…";
@@ -392,7 +419,7 @@
       let usedQuery = "";
       let sawError = false;
       for (const query of buildQueries(name, number, total, !clues)) {
-        const url = "https://api.pokemontcg.io/v2/cards?pageSize=12&orderBy=-set.releaseDate&q=" +
+        const url = "https://api.pokemontcg.io/v2/cards?pageSize=" + (clues ? 36 : 12) + "&orderBy=-set.releaseDate&q=" +
           encodeURIComponent(query);
         // fetch() sends the question over the internet and waits for the answer.
         const response = await fetch(url, { headers: API_KEY ? { "X-Api-Key": API_KEY } : {} });
@@ -414,7 +441,7 @@
 
       if (clues) {
         // After a scan, put the best-fitting card first and show its proper name in the box.
-        cards = rankCards(cards, clues);
+        cards = rankCards(cards, clues).slice(0, 8);
         bestIsClear = cards.length === 1 || scoreCard(cards[0], clues) > scoreCard(cards[1], clues);
         nameInput.value = cards[0].name;
       } else if (cards.every((card) => card.name === cards[0].name)) {
@@ -460,14 +487,15 @@
   // which helps the text reader. The four numbers are fractions of the photo:
   // how far across and down the rectangle starts, then its width and height (1 = the whole photo).
   // "invert" flips light and dark, which helps with white text on a dark footer.
-  function cropPhoto(image, left, top, width, height, invert) {
+  // "scaleRule" says how much to resize. The text reader is picky about text size,
+  // so the scanning code tries several sizes. Without a rule, big photos shrink and small ones grow.
+  function cropPhoto(image, left, top, width, height, invert, scaleRule) {
     const sx = image.naturalWidth * left, sy = image.naturalHeight * top;
     const sw = image.naturalWidth * width, sh = image.naturalHeight * height;
-    // Shrink very large photos so reading is quicker, and enlarge small ones so the text is big enough.
-    const scale = Math.min(Math.max(900 / sw, 1), 1400 / sw);
+    const scale = scaleRule ? scaleRule(sw, sh) : Math.min(Math.max(900 / sw, 1), 1400 / sw);
     const canvas = document.createElement("canvas");
-    canvas.width = Math.round(sw * scale);
-    canvas.height = Math.round(sh * scale);
+    canvas.width = Math.max(1, Math.round(sw * scale));
+    canvas.height = Math.max(1, Math.round(sh * scale));
     const ctx = canvas.getContext("2d");
     ctx.filter = "grayscale(1) contrast(1.4)" + (invert ? " invert(1)" : "");
     ctx.drawImage(image, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
@@ -522,7 +550,7 @@
     const clue = (clues.name || "").toLowerCase();
     if (clue.length >= 3) {
       if (cardName.includes(clue) || clue.includes(cardName)) score += 3;
-      else if (editDistance(cardName, clue) <= 2) score += 2;
+      else if (nameMatches(card.name, clue)) score += 2;
     }
     if (clues.year) {
       const gap = Math.abs(Number(card.set.releaseDate.slice(0, 4)) - clues.year);
@@ -547,12 +575,20 @@
   }
 
   // From everything read at the top of the card, picks the first line that looks like a name.
+  // Lines like "Evolves from Numel" are skipped (a name never contains "from").
   function pickName(text) {
     for (const line of text.split("\n")) {
+      if (/\b(from|evolves)\b/i.test(line) || /^\s*put\b/i.test(line)) continue;
       const name = cleanName(line);
-      if (name.length >= 3 && !/^(evolves|put)\b/i.test(name)) return name;
+      if (name.length >= 3) return name;
     }
     return "";
+  }
+
+  // True if a name read from the photo (even a partial or slightly misread one) fits a card's name.
+  function nameMatches(cardName, clue) {
+    const a = cardName.toLowerCase(), b = clue.toLowerCase();
+    return b.length >= 3 && (a.includes(b) || b.includes(a) || a.split(/\s+/).some((word) => editDistance(word, b) <= 2));
   }
 
   // Looks at the pixels around the card number and says what the little shape after it is:
@@ -639,14 +675,21 @@
   //   set code        "MEG EN"   (newer cards print a short set code and a language)
   //   year            "©2011 Pokémon"
   function parseFooter(text) {
-    const info = { number: "", total: "", setCode: "", year: 0 };
-    let m = text.match(/(\d{1,3})\s*[\/|\\]\s*(\d{1,3})/) || text.match(/(?<!\d)(\d{3})[7Il|](\d{3})(?!\d)/);
+    const info = { number: "", total: "", setCode: "", year: 0, strict: false };
+    // The number must be tight against its total, on one line ("1/98"), so stray marks don't count.
+    // A real "/" is a sure sign. A "|" or a 7 where the "/" should be is a weaker guess.
+    const strict = text.match(/(?<!\d)(\d{1,3}) ?\/ ?(\d{2,3})(?!\d)/);
+    const m = strict || text.match(/(?<!\d)(\d{1,3}) ?[\\|] ?(\d{2,3})(?!\d)/) || text.match(/(?<!\d)(\d{3})[7Il|](\d{3})(?!\d)/);
     if (m) {
       info.number = m[1];
       info.total = m[2];
+      info.strict = !!strict;
     } else {
       const promo = text.match(/\b(SWSH|SM|XY|BW|HGSS|DP)\s*(\d{1,3})\b/);
-      if (promo) info.number = promo[1] + promo[2];
+      if (promo) {
+        info.number = promo[1] + promo[2];
+        info.strict = true;
+      }
     }
     const set = text.match(/\b([A-Z]{2,4})\s*(?:EN|DE|FR|IT|ES|PT)\b/);
     if (set) info.setCode = set[1];
@@ -655,43 +698,138 @@
     return info;
   }
 
+  // The text reader is very sensitive to the size and style of the text it is given: a setting that
+  // reads one photo perfectly can fail on the next. So the number is looked for with a list of
+  // different settings, in order, stopping at the first one that finds it. Each entry is:
+  //   [which part of the bottom edge, where the strip starts, strip height,
+  //    reading mode, text height in pixels, flip light and dark?]
+  const NUMBER_ATTEMPTS = [
+    ["full", 0.86, 0.14, "6", 300, false],
+    ["full", 0.86, 0.14, "11", 400, false],
+    ["left", 0.86, 0.14, "11", 400, false],
+    ["right", 0.86, 0.14, "6", 300, false],
+    ["full", 0.86, 0.14, "11", 300, true],
+    ["full", 0.86, 0.14, "6", 220, false],
+    ["full", 0.86, 0.14, "11", 520, false],
+    ["left", 0.86, 0.14, "11", 520, false],
+    ["full", 0.78, 0.22, "6", 470, false],
+    ["full", 0.78, 0.22, "11", 470, false],
+    ["left", 0.86, 0.14, "6", 300, true],
+    ["right", 0.86, 0.14, "11", 160, false]
+  ];
+  const SIDE_NAMES = { full: "bottom edge", left: "bottom-left corner", right: "bottom-right corner" };
+
+  // Reads the name at the top of the card at two sizes, and keeps the fuller result.
+  async function readName(worker, image, rawParts) {
+    await worker.setParameters({ tessedit_pageseg_mode: "11" });
+    let best = "";
+    for (const [width, invert] of [[1400, false], [900, false], [1400, true]]) {
+      if (invert && best) break; // only flip light and dark if nothing was found
+      const result = await worker.recognize(cropPhoto(image, 0, 0, 1, 0.26, invert, (sw) => width / sw));
+      rawParts.push("[top of card, " + width + "px" + (invert ? ", flipped" : "") + "]\n" + result.data.text.trim());
+      const name = pickName(result.data.text);
+      if (name.length > best.length) best = name;
+    }
+    return best;
+  }
+
+  // The finishes this card comes in, from the price service (Standard, Holo, Reverse holo...).
+  function finishesOf(card) {
+    const names = [];
+    const prices = card.tcgplayer && card.tcgplayer.prices;
+    if (prices) for (const key of Object.keys(prices)) names.push(VARIANT_NAMES[key] || key);
+    const eu = card.cardmarket && card.cardmarket.prices;
+    if (eu && eu.reverseHoloTrend > 0 && !names.includes("Reverse holo")) names.push("Reverse holo");
+    return names.join(", ");
+  }
+
+  // Shows what the scan found: the details of the best-matching card, with a note on each saying
+  // whether it was read from the photo or taken from the matched card.
+  function showScanSummary(clues, card) {
+    summaryBox.replaceChildren();
+    const box = el("section", "", "summary");
+    box.append(el("h2", "What the scan found"));
+    const list = el("dl", "", "summary-list");
+    const row = (label, value, note) => {
+      list.append(el("dt", label));
+      const dd = el("dd");
+      dd.append(el("span", value || "Not found", value ? "" : "missing"));
+      if (note) dd.append(el("small", note));
+      list.append(dd);
+    };
+
+    const readNote = (value, readValue) => (readValue ? "read from photo" : (value ? "from the matched card" : ""));
+    const shapeRarity = { circle: "Common", diamond: "Uncommon", star: "Rare" };
+
+    row("Name", card ? card.name : clues.name,
+      clues.name ? (card && clues.name.toLowerCase() !== card.name.toLowerCase() ? "photo read: “" + clues.name + "”" : "read from photo") : readNote(card && card.name, ""));
+    row("Type", card ? finishesOf(card) : "",
+      card ? "finishes this card comes in. Holo can’t be detected from a photo, so pick yours" : "");
+    row("Number", card ? card.number + "/" + card.set.printedTotal : clues.numberText, readNote(card ? "x" : "", clues.numberText));
+    row("Rarity", card ? card.rarity : (clues.shape ? shapeRarity[clues.shape] : ""),
+      clues.shape ? "photo shape: " + clues.shape : (card ? "from the matched card" : ""));
+    row("Pack", card ? card.set.name : "", clues.setCode ? "set code read: " + clues.setCode : (card ? "from the matched card" : ""));
+    row("Year", card ? card.set.releaseDate.slice(0, 4) : (clues.year ? String(clues.year) : ""),
+      clues.year ? "© year read from photo: " + clues.year : (card ? "the set’s release year" : ""));
+    box.append(list);
+
+    // Warn when the name read from the photo doesn't fit the card found. The number may be misread.
+    if (card && clues.name && clues.name.length >= 3 && !nameMatches(card.name, clues.name)) {
+      box.append(el("p", "The name read from the photo (“" + clues.name + "”) doesn’t match this card, so the number may have been misread. Check the boxes above and search again.", "warn"));
+    }
+    if (!card) {
+      box.append(el("p", clues.numberText ? "No matching card found. Check the boxes above." : "The number wasn’t found. Type it into the box above, or retake the photo.", "warn"));
+    }
+
+    // The raw text, so it's easy to see what the reader actually saw.
+    const details = el("details");
+    details.append(el("summary", "Show the raw reading (for troubleshooting)"));
+    details.append(el("pre", clues.raw));
+    box.append(details);
+    summaryBox.append(box);
+  }
+
   // This runs when you take or pick a photo (both buttons use it).
   async function readPhoto(input) {
     const file = input.files[0];
     if (!file) return;
     results.replaceChildren();
+    summaryBox.replaceChildren();
     statusLine.textContent = "Reading the card… the first scan downloads the text reader and can take a minute.";
 
     let worker;
     try {
       const image = await loadImage(file);
       worker = await Tesseract.createWorker("eng");
-      // "Sparse text" mode finds words scattered around the image instead of expecting a page of text.
-      await worker.setParameters({ tessedit_pageseg_mode: "11" });
 
-      // The number and the little shape after it can be in either bottom corner
-      // (older cards: bottom right. Newer cards: bottom left).
-      // So check one side, and if nothing is found there, check the other side.
-      // If neither side has it, try again with a taller strip and with light and dark flipped.
+      // 1. The number. Numbers can be in either bottom corner (older cards: bottom right,
+      // newer cards: bottom left). The list of attempts checks the whole edge, then each
+      // side on its own, so if nothing is found on one side the other side is checked.
       let found = null;
+      let weak = null; // a less certain reading, kept in case nothing better turns up
       let allText = "";
-      const tries = [[0.86, 0.14, false], [0.86, 0.14, true], [0.78, 0.22, false], [0.78, 0.22, true]];
-      search:
-      for (const [top, height, invert] of tries) {
-        for (const [left, sideName] of [[0, "left"], [0.5, "right"]]) {
-          statusLine.textContent = "Reading the card… checking the bottom " + sideName + " corner.";
-          const canvas = cropPhoto(image, left, top, 0.5, height, invert);
-          const result = await worker.recognize(canvas);
-          allText += "\n" + result.data.text;
-          const info = parseFooter(result.data.text);
-          if (info.number) {
-            found = { canvas: canvas, words: result.data.words || [], info: info };
-            break search;
-          }
+      const rawParts = [];
+      for (let i = 0; i < NUMBER_ATTEMPTS.length; i++) {
+        const [side, top, height, mode, textHeight, invert] = NUMBER_ATTEMPTS[i];
+        const [left, width] = side === "left" ? [0, 0.5] : side === "right" ? [0.5, 0.5] : [0, 1];
+        statusLine.textContent = "Reading the card… looking for the number (" + SIDE_NAMES[side] +
+          ", try " + (i + 1) + " of " + NUMBER_ATTEMPTS.length + ").";
+        await worker.setParameters({ tessedit_pageseg_mode: mode });
+        const canvas = cropPhoto(image, left, top, width, height, invert, (sw, sh) => Math.min(textHeight / sh, 2200 / sw));
+        const result = await worker.recognize(canvas);
+        allText += "\n" + result.data.text;
+        rawParts.push("[try " + (i + 1) + ": " + SIDE_NAMES[side] + ", mode " + mode + (invert ? ", flipped" : "") + "]\n" + result.data.text.trim());
+        const info = parseFooter(result.data.text);
+        if (info.number) {
+          const hit = { canvas: canvas, words: result.data.words || [], info: info, attempt: i + 1 };
+          if (info.strict) { found = hit; break; }
+          if (!weak) weak = hit;
         }
+        if (weak && i + 1 >= weak.attempt + 3) break; // don't keep hunting for a better reading forever
       }
+      if (!found) found = weak;
 
-      // The little shape sits right after the number.
+      // 2. The little shape sits right after the number.
       let shape = "";
       if (found) {
         const numberWord = found.words.find((word) =>
@@ -699,29 +837,38 @@
         if (numberWord) shape = findRarityShape(found.canvas, numberWord);
       }
 
-      // The © year and set code can be on either side too. If still missing, read the whole bottom edge once.
+      // 3. The © year and set code can be on either side too. If still missing, read the whole bottom edge once.
       let clueText = parseFooter(allText);
       if (!clueText.year) {
+        statusLine.textContent = "Reading the card… checking the copyright year.";
+        await worker.setParameters({ tessedit_pageseg_mode: "11" });
         const edge = await worker.recognize(cropPhoto(image, 0, 0.92, 1, 0.08));
         allText += "\n" + edge.data.text;
+        rawParts.push("[bottom edge, for the year]\n" + edge.data.text.trim());
         clueText = parseFooter(allText);
       }
 
-      // The name is somewhere in the top quarter. Read it all, then pick the first line that looks like a name.
+      // 4. The name, from the top of the card.
       statusLine.textContent = "Reading the card… checking the name.";
-      let name = pickName((await worker.recognize(cropPhoto(image, 0, 0, 1, 0.26))).data.text);
-      if (!name) name = pickName((await worker.recognize(cropPhoto(image, 0, 0, 1, 0.26, true))).data.text);
+      const name = await readName(worker, image, rawParts);
 
-      if (!found && name.length < 3) {
-        statusLine.textContent = "Couldn’t find a number or name on either side. Try again with the card filling the frame, upright, flat and without glare, or type it in.";
-        return;
-      }
-      // Fill in the boxes so you can see (and fix) what was read, then search using all the clues.
       const numberText = found ? (found.info.total ? found.info.number + "/" + found.info.total : found.info.number) : "";
+      const summary = [numberText, shape, clueText.year ? "©" + clueText.year : "", clueText.setCode].filter(Boolean).join(", ");
+      const clues = {
+        name: name, year: clueText.year, shape: shape, setCode: clueText.setCode,
+        numberText: numberText, summary: summary,
+        raw: (found ? "Number found on try " + found.attempt + ".\n\n" : "Number not found after " + NUMBER_ATTEMPTS.length + " tries.\n\n") + rawParts.join("\n\n")
+      };
       nameInput.value = name;
       numberInput.value = numberText;
-      const summary = [numberText, shape, clueText.year ? "©" + clueText.year : "", clueText.setCode].filter(Boolean).join(", ");
-      await runSearch({ name: name, year: clueText.year, shape: shape, setCode: clueText.setCode, summary: summary });
+
+      if (!found && name.length < 3) {
+        statusLine.textContent = "Couldn’t find a number or name. Try again with the card filling the frame, upright, flat and without glare, or type it in.";
+        showScanSummary(clues, null);
+        return;
+      }
+      await runSearch(clues);
+      showScanSummary(clues, lastCards[0] || null);
     } catch (error) {
       statusLine.textContent = "Couldn’t read that photo. Check your connection, then try again or type the card in.";
     } finally {
