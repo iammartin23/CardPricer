@@ -423,9 +423,11 @@
   // Builds a list of questions to try, from most specific to least specific.
   // Card numbers are sometimes stored with extra zeros (4, 04 or 004), so we try each.
   // For a photo scan the name is the least trustworthy clue, so number-only questions go first.
-  function buildQueries(name, number, total, nameFirst) {
+  function buildQueries(name, number, total, nameFirst, nameAndTotalFirst) {
     const numbers = number ? [...new Set([number, number.padStart(2, "0"), number.padStart(3, "0")])] : [""];
     const queries = [];
+    // A confidently read name plus the set size finds the card even if a digit of the number was misread.
+    if (nameAndTotalFirst && name && total) queries.push('name:"' + name + '" set.printedTotal:' + total);
     for (const useName of nameFirst ? [true, false] : [false, true]) {
       if (!useName && !total && !/[A-Za-z]/.test(number)) continue; // a plain number alone would match hundreds of cards
       for (const n of numbers) {
@@ -477,7 +479,7 @@
       let cards = [];
       let usedQuery = "";
       let sawError = false;
-      for (const query of buildQueries(name, number, total, !clues)) {
+      for (const query of buildQueries(name, number, total, !clues, !!(clues && clues.nameConfident))) {
         const url = "https://api.pokemontcg.io/v2/cards?pageSize=" + (clues ? 36 : 12) + "&orderBy=-set.releaseDate&q=" +
           encodeURIComponent(query);
         // fetch() sends the question over the internet and waits for the answer.
@@ -548,7 +550,7 @@
   // "invert" flips light and dark, which helps with white text on a dark footer.
   // "scaleRule" says how much to resize. The text reader is picky about text size,
   // so the scanning code tries several sizes. Without a rule, big photos shrink and small ones grow.
-  function cropPhoto(image, left, top, width, height, invert, scaleRule) {
+  function cropPhoto(image, left, top, width, height, invert, scaleRule, contrast) {
     const sx = image.naturalWidth * left, sy = image.naturalHeight * top;
     const sw = image.naturalWidth * width, sh = image.naturalHeight * height;
     const scale = scaleRule ? scaleRule(sw, sh) : Math.min(Math.max(900 / sw, 1), 1400 / sw);
@@ -556,7 +558,8 @@
     canvas.width = Math.max(1, Math.round(sw * scale));
     canvas.height = Math.max(1, Math.round(sh * scale));
     const ctx = canvas.getContext("2d");
-    ctx.filter = "grayscale(1) contrast(1.4)" + (invert ? " invert(1)" : "");
+    const level = contrast || 1.4;
+    ctx.filter = "grayscale(1)" + (level === 1 ? "" : " contrast(" + level + ")") + (invert ? " invert(1)" : "");
     ctx.drawImage(image, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
     return canvas;
   }
@@ -611,6 +614,7 @@
       if (cardName.includes(clue) || clue.includes(cardName)) score += 3;
       else if (nameMatches(card.name, clue)) score += 2;
     }
+    if (clues.number && String(card.number).replace(/^0+/, "").toLowerCase() === clues.number.replace(/^0+/, "").toLowerCase()) score += 3;
     if (clues.year) {
       const gap = Math.abs(Number(card.set.releaseDate.slice(0, 4)) - clues.year);
       if (gap === 0) score += 2;
@@ -759,37 +763,184 @@
 
   // The text reader is very sensitive to the size and style of the text it is given: a setting that
   // reads one photo perfectly can fail on the next. So the number is looked for with a list of
-  // different settings, in order, stopping at the first one that finds it. Each entry is:
+  // different settings, in order. Each entry is:
   //   [which part of the bottom edge, where the strip starts, strip height,
-  //    reading mode, text height in pixels, flip light and dark?]
+  //    reading mode, text height in pixels, flip light and dark?, contrast (1 = none)]
   const NUMBER_ATTEMPTS = [
-    ["full", 0.86, 0.14, "6", 300, false],
-    ["full", 0.86, 0.14, "11", 400, false],
-    ["left", 0.86, 0.14, "11", 400, false],
-    ["right", 0.86, 0.14, "6", 300, false],
-    ["full", 0.86, 0.14, "11", 300, true],
-    ["full", 0.86, 0.14, "6", 220, false],
-    ["full", 0.86, 0.14, "11", 520, false],
-    ["left", 0.86, 0.14, "11", 520, false],
-    ["full", 0.78, 0.22, "6", 470, false],
-    ["full", 0.78, 0.22, "11", 470, false],
-    ["left", 0.86, 0.14, "6", 300, true],
-    ["right", 0.86, 0.14, "11", 160, false]
+    ["full", 0.86, 0.14, "6", 300, false, 1.4],
+    ["right", 0.88, 0.10, "6", 400, false, 1.4],
+    ["full", 0.86, 0.14, "11", 400, false, 1.4],
+    ["left", 0.86, 0.14, "11", 400, false, 1.4],
+    ["right", 0.88, 0.10, "6", 400, false, 1],
+    ["full", 0.88, 0.10, "11", 250, false, 1],
+    ["full", 0.86, 0.14, "11", 300, true, 1.4],
+    ["full", 0.86, 0.14, "6", 220, false, 1.4],
+    ["full", 0.86, 0.14, "11", 520, false, 1.4],
+    ["left", 0.86, 0.14, "11", 520, false, 1.4],
+    ["full", 0.78, 0.22, "6", 470, false, 1.4],
+    ["full", 0.78, 0.22, "11", 470, false, 1.4],
+    ["left", 0.86, 0.14, "6", 300, true, 1.4],
+    ["right", 0.86, 0.14, "11", 160, false, 1.4]
   ];
   const SIDE_NAMES = { full: "bottom edge", left: "bottom-left corner", right: "bottom-right corner" };
 
-  // Reads the name at the top of the card at two sizes, and keeps the fuller result.
+  // The name is read from the top of the card in several ways. Each entry is: [width in pixels, flip light and dark?, reading mode]
+  const NAME_ATTEMPTS = [[700, false, "11"], [500, false, "11"], [1000, false, "6"], [700, true, "11"], [900, false, "6"]];
+
+  // Several readings of the number can disagree (for example "4/114" and "34/114").
+  // The reading that most attempts agree on wins. If they tie, the one with more digits wins,
+  // because a digit lost in a misreading is more common than one invented.
+  function pickConsensus(hits) {
+    const groups = {};
+    for (const hit of hits) {
+      const key = hit.info.number.replace(/^0+/, "") + "/" + hit.info.total.replace(/^0+/, "");
+      (groups[key] = groups[key] || []).push(hit);
+    }
+    const size = (group) => group[0].info.number.replace(/^0+/, "").length + group[0].info.total.replace(/^0+/, "").length;
+    return Object.values(groups).sort((a, b) => b.length - a.length || size(b) - size(a))[0][0];
+  }
+
+  // A simpler way to pick a name when the list of Pokémon names isn't available:
+  // the clearest, largest word at the top.
+  function bestRawName(runs) {
+    let best = null;
+    for (const run of runs) {
+      for (const w of run.words) {
+        const letters = w.text.replace(/[^A-Za-zÀ-ÿ]/g, "");
+        if (letters.length < 4 || w.conf < 60 || isLabelWord(letters) || /^evol/i.test(letters)) continue;
+        const score = w.conf * ((w.y1 - w.y0) / run.scale);
+        if (!best || score > best.score) best = { text: letters, score: score };
+      }
+    }
+    return best ? best.text.charAt(0).toUpperCase() + best.text.slice(1) : "";
+  }
+
+  // Reads the name from the top of the card several ways, and works out the most likely name.
   async function readName(worker, image, rawParts) {
-    await worker.setParameters({ tessedit_pageseg_mode: "11" });
-    let best = "";
-    for (const [width, invert] of [[1400, false], [900, false], [1400, true]]) {
-      if (invert && best) break; // only flip light and dark if nothing was found
-      const result = await worker.recognize(cropPhoto(image, 0, 0, 1, 0.26, invert, (sw) => width / sw));
-      rawParts.push("[top of card, " + width + "px" + (invert ? ", flipped" : "") + "]\n" + result.data.text.trim());
-      const name = pickName(result.data.text);
-      if (name.length > best.length) best = name;
+    await speciesReady; // wait for the list of Pokémon names (it loads when the page opens)
+    const runs = [];
+    const texts = [];
+    for (const [width, invert, mode] of NAME_ATTEMPTS) {
+      await worker.setParameters({ tessedit_pageseg_mode: mode });
+      const canvas = cropPhoto(image, 0, 0, 1, 0.26, invert, (sw) => width / sw);
+      const result = await worker.recognize(canvas);
+      texts.push(result.data.text);
+      rawParts.push("[name, " + width + "px, mode " + mode + (invert ? ", flipped" : "") + "]\n" + result.data.text.trim());
+      runs.push({
+        scale: canvas.width / image.naturalWidth,
+        words: (result.data.words || []).map((w) => ({ text: w.text, conf: w.confidence, x0: w.bbox.x0, y0: w.bbox.y0, x1: w.bbox.x1, y1: w.bbox.y1 }))
+      });
+    }
+    const name = chooseName(runs);
+    if (name) return { name: name, confident: true };
+    const raw = bestRawName(runs);
+    if (raw) return { name: raw, confident: false };
+    for (const text of texts) {
+      const line = pickName(text);
+      if (line) return { name: line, confident: false };
+    }
+    return { name: "", confident: false };
+  }
+
+  // Names of all Pokémon, loaded when the page opens. They are used to correct a misread name
+  // (for example "dydreigon" becomes "Hydreigon"). If the list can't be loaded, names are used as read.
+  let speciesNames = [];
+  async function loadSpecies() {
+    try {
+      const response = await fetch("https://pokeapi.co/api/v2/pokemon-species?limit=2000");
+      const data = await response.json();
+      const names = new Set();
+      for (const item of data.results) {
+        names.add(item.name.replace(/-/g, ""));
+        for (const part of item.name.split("-")) if (part.length >= 4) names.add(part);
+      }
+      speciesNames = [...names];
+    } catch (error) {
+      speciesNames = [];
+    }
+  }
+
+  // Finds the real Pokémon name closest to a word that was read, or null if none is close enough.
+  function snapSpecies(token) {
+    const word = token.toLowerCase().replace(/[^a-z]/g, "");
+    if (word.length < 4) return null;
+    let best = null;
+    for (const name of speciesNames) {
+      if (Math.abs(name.length - word.length) > 2) continue;
+      const dist = editDistance(word, name);
+      if (dist <= Math.max(1, Math.floor(name.length / 4)) && (!best || dist < best.dist)) best = { name: name, dist: dist };
     }
     return best;
+  }
+
+  // Works out the card's name from all the words the text reader found at the top of the card.
+  // "runs" is one entry per reading attempt: { scale, words: [{ text, conf, x0, y0, x1, y1 }] }.
+  // The name is usually the largest, clearest text at the top, so size and confidence both count,
+  // and readings that agree across several attempts add up. Returns "" if nothing looks like a name.
+  function chooseName(runs) {
+    // Put every word on the same footing (size in the original photo's pixels) and sort each run top to bottom.
+    const found = [];
+    runs.forEach((run, runIndex) => {
+      const words = run.words
+        .map((w) => ({ text: w.text, conf: w.conf, x0: w.x0 / run.scale, x1: w.x1 / run.scale, y0: w.y0 / run.scale, y1: w.y1 / run.scale, run: runIndex }))
+        .filter((w) => /[A-Za-z]/.test(w.text));
+      // Words on a row that says "Evolves from ..." are the earlier form's name, not this card's.
+      const skipRows = words.filter((w) => editDistance(w.text.toLowerCase().replace(/[^a-z]/g, ""), "evolves") <= 2)
+        .map((w) => ({ top: w.y0 - (w.y1 - w.y0), bottom: w.y1 + (w.y1 - w.y0) }));
+      const usable = words.filter((w) => !skipRows.some((r) => (w.y0 + w.y1) / 2 > r.top && (w.y0 + w.y1) / 2 < r.bottom));
+      usable.sort((a, b) => a.x0 - b.x0);
+      for (let i = 0; i < usable.length; i++) {
+        const w = usable[i];
+        // The word on its own, and joined to the next word on the same row (for names read in two pieces).
+        const options = [{ text: w.text, x1: w.x1, last: i }];
+        const next = usable[i + 1];
+        if (next && Math.abs((next.y0 + next.y1) / 2 - (w.y0 + w.y1) / 2) < (w.y1 - w.y0) * 0.6 && next.x0 - w.x1 < (w.y1 - w.y0)) {
+          options.push({ text: w.text + next.text, x1: next.x1, last: i + 1 });
+        }
+        for (const option of options) {
+          if (isLabelWord(option.text)) continue;
+          const snap = snapSpecies(option.text);
+          if (snap) found.push({ species: snap.name, dist: snap.dist, conf: Math.max(0, w.conf), height: w.y1 - w.y0, word: w, option: option, row: usable, tokenText: option.text });
+        }
+      }
+    });
+    if (found.length === 0) return "";
+
+    // Score each candidate: closeness to a real name, how sure the reader was, and how big the text is.
+    const tallest = Math.max(...found.map((c) => c.height));
+    const totals = {};
+    let bestSingle = {};
+    for (const c of found) {
+      const score = (1 - c.dist / c.species.length) * (0.5 + c.conf / 200) * Math.pow(c.height / tallest, 1.5);
+      c.score = score;
+      totals[c.species] = (totals[c.species] || 0) + score;
+      if (!bestSingle[c.species] || score > bestSingle[c.species].score) bestSingle[c.species] = c;
+    }
+    const species = Object.keys(totals).sort((a, b) => totals[b] - totals[a])[0];
+    const pick = bestSingle[species];
+
+    // Look for a suffix right after the name: EX, GX, V, VMAX, VSTAR (older cards print EX, newer ones ex).
+    const suffixOf = (text) => {
+      const letters = text.replace(/[^A-Za-z]/g, "");
+      const upper = letters.toUpperCase();
+      if (upper === "VMAX" || upper === "VSTAR" || upper === "GX" || upper === "V") return upper;
+      if (/^E[X]?$/.test(upper) && (upper === "EX" || /[>«x]/.test(text) || upper === "E")) {
+        return /^e[xX]$/.test(letters) && letters.includes("x") ? "ex" : "EX";
+      }
+      return "";
+    };
+    let suffix = "";
+    const token = pick.tokenText.replace(/[^A-Za-z]/g, "");
+    if (token.toLowerCase().startsWith(species.slice(0, Math.max(4, species.length - 1))) && token.length > species.length) {
+      suffix = suffixOf(token.slice(species.length)) || "";
+    }
+    if (!suffix) {
+      const rowHeight = pick.height;
+      const after = pick.row.filter((w) => w.x0 >= pick.option.x1 - 4 && w.x0 - pick.option.x1 < rowHeight * 3
+        && Math.abs((w.y0 + w.y1) / 2 - (pick.word.y0 + pick.word.y1) / 2) < rowHeight * 0.7);
+      for (const w of after) { suffix = suffixOf(w.text); if (suffix) break; }
+    }
+    return species.charAt(0).toUpperCase() + species.slice(1) + (suffix ? " " + suffix : "");
   }
 
   // The finishes this card comes in, as plain words (Standard, Holo, Reverse holo...).
@@ -859,29 +1010,35 @@
       // 1. The number. Numbers can be in either bottom corner (older cards: bottom right,
       // newer cards: bottom left). The list of attempts checks the whole edge, then each
       // side on its own, so if nothing is found on one side the other side is checked.
-      let found = null;
-      let weak = null; // a less certain reading, kept in case nothing better turns up
+      const strictHits = []; // readings with a real "/" in them
+      let weak = null;       // a less certain reading, kept in case nothing better turns up
+      let lastTry = NUMBER_ATTEMPTS.length;
       let allText = "";
       const rawParts = [];
-      for (let i = 0; i < NUMBER_ATTEMPTS.length; i++) {
-        const [side, top, height, mode, textHeight, invert] = NUMBER_ATTEMPTS[i];
+      for (let i = 0; i < NUMBER_ATTEMPTS.length && i < lastTry; i++) {
+        const [side, top, height, mode, textHeight, invert, contrast] = NUMBER_ATTEMPTS[i];
         const [left, width] = side === "left" ? [0, 0.5] : side === "right" ? [0.5, 0.5] : [0, 1];
         statusLine.textContent = "Reading the card… looking for the number (" + SIDE_NAMES[side] +
           ", try " + (i + 1) + " of " + NUMBER_ATTEMPTS.length + ").";
         await worker.setParameters({ tessedit_pageseg_mode: mode });
-        const canvas = cropPhoto(image, left, top, width, height, invert, (sw, sh) => Math.min(textHeight / sh, 2200 / sw));
+        const canvas = cropPhoto(image, left, top, width, height, invert, (sw, sh) => Math.min(textHeight / sh, 2200 / sw), contrast);
         const result = await worker.recognize(canvas);
         allText += "\n" + result.data.text;
         rawParts.push("[try " + (i + 1) + ": " + SIDE_NAMES[side] + ", mode " + mode + (invert ? ", flipped" : "") + "]\n" + result.data.text.trim());
         const info = parseFooter(result.data.text);
         if (info.number) {
           const hit = { canvas: canvas, words: result.data.words || [], info: info, attempt: i + 1 };
-          if (info.strict) { found = hit; break; }
-          if (!weak) weak = hit;
+          if (info.strict) {
+            strictHits.push(hit);
+            // After the first sure reading, check two more attempts, in case the first one lost a digit.
+            if (strictHits.length === 1) lastTry = Math.min(lastTry, i + 3);
+          } else if (!weak) {
+            weak = hit;
+          }
         }
-        if (weak && i + 1 >= weak.attempt + 3) break; // don't keep hunting for a better reading forever
+        if (!strictHits.length && weak && i + 1 >= weak.attempt + 3) break; // don't hunt for a better reading forever
       }
-      if (!found) found = weak;
+      const found = strictHits.length ? pickConsensus(strictHits) : weak;
 
       // 2. The little shape sits right after the number.
       let shape = "";
@@ -904,13 +1061,14 @@
 
       // 4. The name, from the top of the card.
       statusLine.textContent = "Reading the card… checking the name.";
-      const name = await readName(worker, image, rawParts);
+      const nameResult = await readName(worker, image, rawParts);
+      const name = nameResult.name;
 
       const numberText = found ? (found.info.total ? found.info.number + "/" + found.info.total : found.info.number) : "";
       const summary = [numberText, shape, clueText.year ? "©" + clueText.year : "", clueText.setCode].filter(Boolean).join(", ");
       const clues = {
         name: name, year: clueText.year, shape: shape, setCode: clueText.setCode,
-        numberText: numberText, summary: summary,
+        numberText: numberText, number: found ? found.info.number : "", nameConfident: nameResult.confident, summary: summary,
         raw: (found ? "Number found on try " + found.attempt + ".\n\n" : "Number not found after " + NUMBER_ATTEMPTS.length + " tries.\n\n") + rawParts.join("\n\n")
       };
       nameInput.value = name;
@@ -933,6 +1091,7 @@
     photoInputs.forEach((input) => input.addEventListener("change", () => readPhoto(input)));
 
   // When the page opens: show the market note and fetch the exchange rate.
+  const speciesReady = loadSpecies();
   updateNote(currentMarket());
   loadRate().then(() => updateNote(currentMarket()));
 </script>
