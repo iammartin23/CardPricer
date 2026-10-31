@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  CARD VALUE FINDER, STAGE 2 (camera, with number, shape and year clues)
+  CARD VALUE FINDER (camera scan, bulk scan and a saved collection)
   This one file is the whole app. It has three parts:
     1. HTML  (between <body> and </body>)  = what is on the page
     2. CSS   (inside <style>)              = how it looks
@@ -134,6 +134,48 @@
   }
   .price-note { margin: 2px 0 0; font-size: 0.85rem; color: var(--muted); }
   .price small { font-size: 0.8rem; font-weight: 400; color: var(--muted); letter-spacing: 0; }
+  /* Tabs, smaller buttons, the collection list and the bulk scan list. */
+  .tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 16px 0; }
+  .tab { min-height: 48px; background: var(--panel); color: var(--ink); border: 1px solid var(--line); }
+  .tab[aria-selected="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .secondary { min-height: 44px; padding: 0 14px; background: transparent; color: var(--ink); border: 2px solid var(--ink); }
+  .secondary:disabled { opacity: 0.4; cursor: default; }
+  .scan-many { grid-column: 1 / -1; }
+  .add-button { width: 100%; margin-top: 12px; }
+  select {
+    font: inherit; min-height: 44px; padding: 0 10px;
+    border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink);
+  }
+  .collection-title { font-size: 1.3rem; margin: 0 0 6px; }
+  .collection-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 12px 0; }
+  .coll-row {
+    display: grid; grid-template-columns: 84px 1fr; gap: 12px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-bottom: 12px;
+  }
+  .coll-row > img { width: 100%; height: auto; border-radius: 6px; }
+  .coll-row h3 { font-size: 1.1rem; margin: 0; }
+  .coll-row .set-symbol { width: auto; height: 18px; flex: none; }
+  .coll-picks { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .tag { display: inline-flex; align-items: center; min-height: 44px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 0.9rem; }
+  .qty { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
+  .qty button { min-width: 44px; padding: 0; }
+  .qty-number { min-width: 1.5em; text-align: center; font-weight: 800; }
+  .coll-price { font-size: 1.2rem; margin-top: 8px; }
+  .remove { margin-top: 8px; }
+  .batch { margin-bottom: 16px; }
+  .batch h2 { font-size: 1.2rem; margin: 0 0 6px; }
+  .batch-row {
+    display: grid; grid-template-columns: 56px 1fr; gap: 10px; padding: 10px; margin-bottom: 8px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  }
+  .batch-row img { width: 56px; height: 76px; object-fit: cover; border-radius: 4px; background: var(--line); }
+  .batch-row.review { border: 2px solid #d99a00; }
+  .batch-row.failed { border: 2px solid #c0392b; }
+  .batch-row.added { border-left: 6px solid #2e9e5b; }
+  .batch-title { margin: 0; font-weight: 800; }
+  .candidate { display: block; width: 100%; margin-top: 8px; padding: 8px 12px; text-align: left; font-weight: 600; font-size: 0.9rem; }
+  .batch details { margin-top: 8px; font-size: 0.85rem; color: var(--muted); }
+  .batch pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.75rem; max-height: 12em; overflow: auto; }
   .note { margin-top: 24px; font-size: 0.85rem; color: var(--muted); }
 </style>
 </head>
@@ -141,50 +183,87 @@
 <body>
 <main>
   <h1>Card value finder</h1>
-  <p class="lede">Scan or search a Pokémon card to see its recent market price.</p>
+  <p class="lede">Scan or search a Pokémon card to see its recent market price, and keep a collection.</p>
 
-  <!-- STAGE 2: "capture" makes the first button open your camera. The second lets you pick an existing photo. -->
-  <div class="scan">
-    <div class="scan-buttons">
-      <label class="scan-button">Take a photo
-        <input class="photo-input" type="file" accept="image/*" capture="environment">
-      </label>
-      <label class="scan-button">Choose a photo
-        <input class="photo-input" type="file" accept="image/*">
-      </label>
+  <!-- The UK / EU / US picker sits at the top because it changes the prices on both tabs. -->
+  <div>
+    <p class="field-label">Market and currency</p>
+    <div class="market" role="radiogroup" aria-label="Market and currency">
+      <label><input type="radio" name="market" value="uk" checked> UK (£)</label>
+      <label><input type="radio" name="market" value="eu"> EU (€)</label>
+      <label><input type="radio" name="market" value="us"> US ($)</label>
     </div>
-    <p class="muted">Fill the frame with the card, upright and flat, with no glare. The number can be in either bottom corner, and the page checks both. The boxes below show what was read, so you can correct them and search again.</p>
+  </div>
+  <p id="market-note" class="note"></p>
+
+  <!-- The two tabs. The script shows one section and hides the other. -->
+  <nav class="tabs" aria-label="Sections">
+    <button type="button" id="tab-scan" class="tab" aria-selected="true">Scan and search</button>
+    <button type="button" id="tab-collection" class="tab" aria-selected="false">Collection (0)</button>
+  </nav>
+
+  <div id="view-scan">
+    <!-- "capture" makes the first button open your camera. The second picks one photo, and the third picks many. -->
+    <div class="scan">
+      <div class="scan-buttons">
+        <label class="scan-button">Take a photo
+          <input class="photo-input" type="file" accept="image/*" capture="environment">
+        </label>
+        <label class="scan-button">Choose a photo
+          <input class="photo-input" type="file" accept="image/*">
+        </label>
+        <label class="scan-button scan-many">Scan many photos
+          <input id="bulk-input" type="file" accept="image/*" multiple>
+        </label>
+      </div>
+      <p class="muted">Fill the frame with the card, upright and flat, with no glare. The number can be in either bottom corner, and the page checks both. The boxes below show what was read, so you can correct them and search again.</p>
+    </div>
+
+    <!-- The bulk scan list appears here. -->
+    <section id="batch" class="batch" hidden>
+      <h2>Bulk scan</h2>
+      <p id="batch-head" role="status"></p>
+      <button type="button" id="stop-batch" class="secondary" hidden>Stop after this photo</button>
+      <div id="batch-list"></div>
+    </section>
+
+    <!-- The search form. Each <input> is a box you type in. -->
+    <form id="search-form">
+      <label>Card name
+        <input id="card-name" type="text" placeholder="Charizard" autocomplete="off">
+      </label>
+      <label>Card number (optional, like 4/102 or SWSH229)
+        <input id="card-number" type="text" placeholder="4 or 4/102" autocomplete="off">
+      </label>
+      <button type="submit">Look up value</button>
+    </form>
+
+    <!-- The script writes messages and results into these empty spots. -->
+    <p id="status" role="status"></p>
+    <section id="scan-summary"></section>
+    <section id="results"></section>
+
+    <p class="note">
+      Prices are estimates from TCGplayer and Cardmarket.
+      Condition, edition, and grading can change what a card really sells for.
+    </p>
   </div>
 
-  <!-- The search form. Each <input> is a box you type in. -->
-  <form id="search-form">
-    <label>Card name
-      <input id="card-name" type="text" placeholder="Charizard" autocomplete="off">
-    </label>
-    <label>Card number (optional, like 4/102 or SWSH229)
-      <input id="card-number" type="text" placeholder="4 or 4/102" autocomplete="off">
-    </label>
-    <div>
-      <p class="field-label">Market and currency</p>
-      <div class="market" role="radiogroup" aria-label="Market and currency">
-        <label><input type="radio" name="market" value="uk" checked> UK (£)</label>
-        <label><input type="radio" name="market" value="eu"> EU (€)</label>
-        <label><input type="radio" name="market" value="us"> US ($)</label>
-      </div>
+  <!-- The collection, saved on this phone. -->
+  <div id="view-collection" hidden>
+    <h2 class="collection-title">Your collection</h2>
+    <p id="collection-summary"></p>
+    <div class="collection-actions">
+      <button type="button" id="refresh-prices" class="secondary">Refresh prices</button>
+      <button type="button" id="export-json" class="secondary">Save backup</button>
+      <button type="button" id="export-csv" class="secondary">Save as spreadsheet</button>
+      <label class="scan-button">Restore backup
+        <input id="import-file" type="file" accept=".json,application/json">
+      </label>
     </div>
-    <button type="submit">Look up value</button>
-  </form>
-
-  <!-- The script writes messages and results into these two empty spots. -->
-  <p id="status" role="status"></p>
-  <section id="scan-summary"></section>
-  <section id="results"></section>
-
-  <p id="market-note" class="note"></p>
-  <p class="note">
-    Prices are estimates from TCGplayer and Cardmarket.
-    Condition, edition, and grading can change what a card really sells for.
-  </p>
+    <p id="collection-status" class="muted" role="status"></p>
+    <section id="collection-list"></section>
+  </div>
 </main>
 
 <!-- The free Tesseract.js library, which reads text from images. -->
@@ -204,6 +283,19 @@
   const results = document.getElementById("results");
   const marketNote = document.getElementById("market-note");
   const summaryBox = document.getElementById("scan-summary");
+  const viewScan = document.getElementById("view-scan");
+  const viewCollection = document.getElementById("view-collection");
+  const scanTab = document.getElementById("tab-scan");
+  const collectionTab = document.getElementById("tab-collection");
+  const collectionList = document.getElementById("collection-list");
+  const collectionSummary = document.getElementById("collection-summary");
+  const collectionStatus = document.getElementById("collection-status");
+  const refreshButton = document.getElementById("refresh-prices");
+  const bulkInput = document.getElementById("bulk-input");
+  const batchBox = document.getElementById("batch");
+  const batchHead = document.getElementById("batch-head");
+  const batchList = document.getElementById("batch-list");
+  const stopButton = document.getElementById("stop-batch");
   const photoInputs = document.querySelectorAll(".photo-input");
 
   // The page remembers the last search, so switching UK / EU / US can redraw it
@@ -399,6 +491,13 @@
         ? "The exchange rate didn’t load. Try the EU view."
         : "No price listed for this finish in this market.", "muted"));
     }
+    const addButton = el("button", "Add to collection", "secondary add-button");
+    addButton.type = "button";
+    addButton.addEventListener("click", () => {
+      const item = addToCollection(card, chosen || "normal", 1);
+      addButton.textContent = "Added ✓ You have " + item.quantity + " in your collection";
+    });
+    info.append(addButton);
     info.append(ebayLink(card, market));
 
     row.append(image, info);
@@ -413,11 +512,12 @@
     lastCards.forEach((card, index) => results.append(renderCard(card, market, bestIsClear && index === 0)));
   }
 
-  // This runs when you tap UK, EU or US.
-  form.addEventListener("change", async (event) => {
+  // This runs when you tap UK, EU or US: both tabs are redrawn with prices for that market.
+  document.addEventListener("change", async (event) => {
     if (event.target.name !== "market") return;
     if (currentMarket() === "uk" && !eurToGbp) await loadRate();
     showResults();
+    renderCollection();
   });
 
   // Builds a list of questions to try, from most specific to least specific.
@@ -454,15 +554,37 @@
     return queries;
   }
 
+  // Cleans up what was typed (or read from a photo): removes quote marks and splits "4/102" into the number and the set size.
+  function parseInputs(nameText, numberText) {
+    const name = nameText.replace(/["\\]/g, "").trim();
+    const [rawNumber, rawTotal] = numberText.split("/");
+    const number = rawNumber.replace(/[^A-Za-z0-9-]/g, "").replace(/^0+(?=\d)/, "");
+    const total = (rawTotal || "").replace(/\D/g, "").replace(/^0+(?=\d)/, "");
+    return { name: name, number: number, total: total };
+  }
+
+  // Asks the card service for matching cards, trying the questions from buildQueries in order
+  // and stopping at the first that finds something. Returns { cards, usedQuery, sawError, rateLimited }.
+  // Network failures are thrown for the caller to handle.
+  async function searchCards(name, number, total, clues) {
+    let sawError = false;
+    for (const query of buildQueries(name, number, total, !clues, !!(clues && clues.nameConfident))) {
+      const url = "https://api.pokemontcg.io/v2/cards?pageSize=" + (clues ? 36 : 12) + "&orderBy=-set.releaseDate&q=" +
+        encodeURIComponent(query);
+      // fetch() sends the question over the internet and waits for the answer.
+      const response = await fetch(url, { headers: API_KEY ? { "X-Api-Key": API_KEY } : {} });
+      if (response.status === 429) return { cards: [], usedQuery: "", sawError: sawError, rateLimited: true };
+      if (!response.ok) { sawError = true; continue; }
+      const data = await response.json();
+      if (data.data.length > 0) return { cards: data.data, usedQuery: query, sawError: sawError, rateLimited: false };
+    }
+    return { cards: [], usedQuery: "", sawError: sawError, rateLimited: false };
+  }
+
   // Looks up the cards typed into the boxes. Both "Look up value" and the camera use this.
   // "clues" is only given after a photo scan: the name, year and shape read from the photo.
   async function runSearch(clues) {
-    // Clean up what you typed: remove quote marks, and split "4/102" into the number and the set size.
-    const name = nameInput.value.replace(/["\\]/g, "").trim();
-    const [rawNumber, rawTotal] = numberInput.value.split("/");
-    const number = rawNumber.replace(/[^A-Za-z0-9-]/g, "").replace(/^0+(?=\d)/, "");
-    const total = (rawTotal || "").replace(/\D/g, "").replace(/^0+(?=\d)/, "");
-
+    const { name, number, total } = parseInputs(nameInput.value, numberInput.value);
     const isCode = /[A-Za-z]/.test(number); // promo codes like SWSH229 are unique without a set size
     if (!name && !(number && (total || isCode))) {
       statusLine.textContent = "Enter a card name, or a number like 4/102 or SWSH229.";
@@ -476,23 +598,11 @@
     statusLine.textContent = "Searching…";
 
     try {
-      let cards = [];
-      let usedQuery = "";
-      let sawError = false;
-      for (const query of buildQueries(name, number, total, !clues, !!(clues && clues.nameConfident))) {
-        const url = "https://api.pokemontcg.io/v2/cards?pageSize=" + (clues ? 36 : 12) + "&orderBy=-set.releaseDate&q=" +
-          encodeURIComponent(query);
-        // fetch() sends the question over the internet and waits for the answer.
-        const response = await fetch(url, { headers: API_KEY ? { "X-Api-Key": API_KEY } : {} });
-        if (response.status === 429) {
-          statusLine.textContent = "Too many searches right now. Wait a minute, or add a free API key at the top of the script.";
-          return;
-        }
-        if (!response.ok) { sawError = true; continue; }
-        const data = await response.json();
-        if (data.data.length > 0) { cards = data.data; usedQuery = query; break; }
+      let { cards, usedQuery, sawError, rateLimited } = await searchCards(name, number, total, clues);
+      if (rateLimited) {
+        statusLine.textContent = "Too many searches right now. Wait a minute, or add a free API key at the top of the script.";
+        return;
       }
-
       if (cards.length === 0) {
         statusLine.textContent = sawError
           ? "The price service had a problem. Try again in a moment."
@@ -1002,7 +1112,76 @@
     summaryBox.append(box);
   }
 
-  // This runs when you take or pick a photo (both buttons use it).
+  // Reads one photo of a card and returns everything learned from it ("clues"):
+  // the name, number, shape, year and set code, plus the raw text for troubleshooting.
+  // "setStatus" is called with progress messages. Both the single scan and the bulk scan use this.
+  async function scanImage(worker, image, setStatus) {
+    // 1. The number. Numbers can be in either bottom corner (older cards: bottom right,
+    // newer cards: bottom left). The list of attempts checks the whole edge, then each
+    // side on its own, so if nothing is found on one side the other side is checked.
+    const strictHits = []; // readings with a real "/" in them
+    let weak = null;       // a less certain reading, kept in case nothing better turns up
+    let lastTry = NUMBER_ATTEMPTS.length;
+    let allText = "";
+    const rawParts = [];
+    for (let i = 0; i < NUMBER_ATTEMPTS.length && i < lastTry; i++) {
+      const [side, top, height, mode, textHeight, invert, contrast] = NUMBER_ATTEMPTS[i];
+      const [left, width] = side === "left" ? [0, 0.5] : side === "right" ? [0.5, 0.5] : [0, 1];
+      setStatus("Reading the card… looking for the number (" + SIDE_NAMES[side] +
+        ", try " + (i + 1) + " of " + NUMBER_ATTEMPTS.length + ").");
+      await worker.setParameters({ tessedit_pageseg_mode: mode });
+      const canvas = cropPhoto(image, left, top, width, height, invert, (sw, sh) => Math.min(textHeight / sh, 2200 / sw), contrast);
+      const result = await worker.recognize(canvas);
+      allText += "\n" + result.data.text;
+      rawParts.push("[try " + (i + 1) + ": " + SIDE_NAMES[side] + ", mode " + mode + (invert ? ", flipped" : "") + "]\n" + result.data.text.trim());
+      const info = parseFooter(result.data.text);
+      if (info.number) {
+        const hit = { canvas: canvas, words: result.data.words || [], info: info, attempt: i + 1 };
+        if (info.strict) {
+          strictHits.push(hit);
+          // After the first sure reading, check two more attempts, in case the first one lost a digit.
+          if (strictHits.length === 1) lastTry = Math.min(lastTry, i + 3);
+        } else if (!weak) {
+          weak = hit;
+        }
+      }
+      if (!strictHits.length && weak && i + 1 >= weak.attempt + 3) break; // don't hunt for a better reading forever
+    }
+    const found = strictHits.length ? pickConsensus(strictHits) : weak;
+
+    // 2. The little shape sits right after the number.
+    let shape = "";
+    if (found) {
+      const numberWord = found.words.find((word) =>
+        /\d\s*[\/|\\]\s*\d/.test(word.text) || /(?<!\d)\d{3}[7Il|]\d{3}(?!\d)/.test(word.text));
+      if (numberWord) shape = findRarityShape(found.canvas, numberWord);
+    }
+
+    // 3. The © year and set code can be on either side too. If still missing, read the whole bottom edge once.
+    let clueText = parseFooter(allText);
+    if (!clueText.year) {
+      setStatus("Reading the card… checking the copyright year.");
+      await worker.setParameters({ tessedit_pageseg_mode: "11" });
+      const edge = await worker.recognize(cropPhoto(image, 0, 0.92, 1, 0.08));
+      allText += "\n" + edge.data.text;
+      rawParts.push("[bottom edge, for the year]\n" + edge.data.text.trim());
+      clueText = parseFooter(allText);
+    }
+
+    // 4. The name, from the top of the card.
+    setStatus("Reading the card… checking the name.");
+    const nameResult = await readName(worker, image, rawParts);
+
+    const numberText = found ? (found.info.total ? found.info.number + "/" + found.info.total : found.info.number) : "";
+    const summary = [numberText, shape, clueText.year ? "©" + clueText.year : "", clueText.setCode].filter(Boolean).join(", ");
+    return {
+      name: nameResult.name, year: clueText.year, shape: shape, setCode: clueText.setCode,
+      numberText: numberText, number: found ? found.info.number : "", nameConfident: nameResult.confident, summary: summary,
+      raw: (found ? "Number found on try " + found.attempt + ".\n\n" : "Number not found after " + NUMBER_ATTEMPTS.length + " tries.\n\n") + rawParts.join("\n\n")
+    };
+  }
+
+  // This runs when you take or pick a single photo (both buttons use it).
   async function readPhoto(input) {
     const file = input.files[0];
     if (!file) return;
@@ -1014,75 +1193,11 @@
     try {
       const image = await loadImage(file);
       worker = await Tesseract.createWorker("eng");
+      const clues = await scanImage(worker, image, (text) => { statusLine.textContent = text; });
+      nameInput.value = clues.name;
+      numberInput.value = clues.numberText;
 
-      // 1. The number. Numbers can be in either bottom corner (older cards: bottom right,
-      // newer cards: bottom left). The list of attempts checks the whole edge, then each
-      // side on its own, so if nothing is found on one side the other side is checked.
-      const strictHits = []; // readings with a real "/" in them
-      let weak = null;       // a less certain reading, kept in case nothing better turns up
-      let lastTry = NUMBER_ATTEMPTS.length;
-      let allText = "";
-      const rawParts = [];
-      for (let i = 0; i < NUMBER_ATTEMPTS.length && i < lastTry; i++) {
-        const [side, top, height, mode, textHeight, invert, contrast] = NUMBER_ATTEMPTS[i];
-        const [left, width] = side === "left" ? [0, 0.5] : side === "right" ? [0.5, 0.5] : [0, 1];
-        statusLine.textContent = "Reading the card… looking for the number (" + SIDE_NAMES[side] +
-          ", try " + (i + 1) + " of " + NUMBER_ATTEMPTS.length + ").";
-        await worker.setParameters({ tessedit_pageseg_mode: mode });
-        const canvas = cropPhoto(image, left, top, width, height, invert, (sw, sh) => Math.min(textHeight / sh, 2200 / sw), contrast);
-        const result = await worker.recognize(canvas);
-        allText += "\n" + result.data.text;
-        rawParts.push("[try " + (i + 1) + ": " + SIDE_NAMES[side] + ", mode " + mode + (invert ? ", flipped" : "") + "]\n" + result.data.text.trim());
-        const info = parseFooter(result.data.text);
-        if (info.number) {
-          const hit = { canvas: canvas, words: result.data.words || [], info: info, attempt: i + 1 };
-          if (info.strict) {
-            strictHits.push(hit);
-            // After the first sure reading, check two more attempts, in case the first one lost a digit.
-            if (strictHits.length === 1) lastTry = Math.min(lastTry, i + 3);
-          } else if (!weak) {
-            weak = hit;
-          }
-        }
-        if (!strictHits.length && weak && i + 1 >= weak.attempt + 3) break; // don't hunt for a better reading forever
-      }
-      const found = strictHits.length ? pickConsensus(strictHits) : weak;
-
-      // 2. The little shape sits right after the number.
-      let shape = "";
-      if (found) {
-        const numberWord = found.words.find((word) =>
-          /\d\s*[\/|\\]\s*\d/.test(word.text) || /(?<!\d)\d{3}[7Il|]\d{3}(?!\d)/.test(word.text));
-        if (numberWord) shape = findRarityShape(found.canvas, numberWord);
-      }
-
-      // 3. The © year and set code can be on either side too. If still missing, read the whole bottom edge once.
-      let clueText = parseFooter(allText);
-      if (!clueText.year) {
-        statusLine.textContent = "Reading the card… checking the copyright year.";
-        await worker.setParameters({ tessedit_pageseg_mode: "11" });
-        const edge = await worker.recognize(cropPhoto(image, 0, 0.92, 1, 0.08));
-        allText += "\n" + edge.data.text;
-        rawParts.push("[bottom edge, for the year]\n" + edge.data.text.trim());
-        clueText = parseFooter(allText);
-      }
-
-      // 4. The name, from the top of the card.
-      statusLine.textContent = "Reading the card… checking the name.";
-      const nameResult = await readName(worker, image, rawParts);
-      const name = nameResult.name;
-
-      const numberText = found ? (found.info.total ? found.info.number + "/" + found.info.total : found.info.number) : "";
-      const summary = [numberText, shape, clueText.year ? "©" + clueText.year : "", clueText.setCode].filter(Boolean).join(", ");
-      const clues = {
-        name: name, year: clueText.year, shape: shape, setCode: clueText.setCode,
-        numberText: numberText, number: found ? found.info.number : "", nameConfident: nameResult.confident, summary: summary,
-        raw: (found ? "Number found on try " + found.attempt + ".\n\n" : "Number not found after " + NUMBER_ATTEMPTS.length + " tries.\n\n") + rawParts.join("\n\n")
-      };
-      nameInput.value = name;
-      numberInput.value = numberText;
-
-      if (!found && name.length < 3) {
+      if (!clues.numberText && clues.name.length < 3) {
         statusLine.textContent = "Couldn’t find a number or name. Try again with the card filling the frame, upright, flat and without glare, or type it in.";
         showScanSummary(clues, null);
         return;
@@ -1096,12 +1211,471 @@
       input.value = ""; // lets you scan the same card again
     }
   }
+
     photoInputs.forEach((input) => input.addEventListener("change", () => readPhoto(input)));
+
+  // ---------- COLLECTION (saved on this phone) ----------
+  // Your cards are saved in this browser's own storage, so they are still there next time you open the page.
+  // They stay on this phone and browser only, so use "Save backup" now and then to keep a copy.
+  const STORE_KEY = "cardValueFinder.collection";
+  const CONDITIONS = ["Near Mint", "Lightly Played", "Moderately Played", "Heavily Played", "Damaged"];
+  let collection = loadCollection();
+
+  function loadCollection() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORE_KEY));
+      return Array.isArray(saved) ? saved : [];
+    } catch (error) {
+      return [];
+    }
+  }
+
+  // Returns false if the browser wouldn't save (storage full or switched off, for example).
+  function saveCollection() {
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify(collection));
+      return true;
+    } catch (error) {
+      collectionStatus.textContent = "Couldn’t save to this browser (storage may be full or blocked). Use Save backup to keep a copy.";
+      return false;
+    }
+  }
+
+  function collectionCount() {
+    return collection.reduce((sum, item) => sum + item.quantity, 0);
+  }
+
+  function updateTabs() {
+    collectionTab.textContent = "Collection (" + collectionCount() + ")";
+  }
+
+  // The finish used when a card is added without choosing one (usually Standard).
+  function defaultFinish(card) {
+    return finishKeys(card)[0] || "normal";
+  }
+
+  // Adds a card, or adds to the quantity if the same card and finish is already there.
+  // The prices are saved with the card, so the collection can be valued without searching again.
+  function addToCollection(card, finish, quantity) {
+    const id = card.id + "|" + finish;
+    let item = collection.find((entry) => entry.id === id);
+    if (item) {
+      item.quantity += quantity;
+    } else {
+      item = {
+        id: id, cardId: card.id, name: card.name, setName: card.set.name, year: card.set.releaseDate.slice(0, 4),
+        number: card.number, total: card.set.printedTotal, rarity: card.rarity || "",
+        image: card.images.small, symbol: card.set.images.symbol,
+        finish: finish, finishes: finishKeys(card), condition: CONDITIONS[0], quantity: quantity, added: Date.now(),
+        prices: { us: (card.tcgplayer && card.tcgplayer.prices) || null, eu: (card.cardmarket && card.cardmarket.prices) || null },
+        priceDate: new Date().toISOString().slice(0, 10)
+      };
+      collection.unshift(item);
+    }
+    saveCollection();
+    updateTabs();
+    return item;
+  }
+
+  // The saved price of one copy in the chosen market, or null if there isn't one.
+  function itemPrice(item, market) {
+    if (market === "us") {
+      const p = item.prices.us && item.prices.us[item.finish];
+      const value = p ? (p.market != null ? p.market : p.mid) : null;
+      return value != null ? { value: value, currency: "USD" } : null;
+    }
+    const eu = item.prices.eu;
+    const rate = market === "uk" ? eurToGbp : 1;
+    if (!eu || !rate) return null;
+    const trend = item.finish === "reverseHolofoil" ? eu.reverseHoloTrend : eu.trendPrice;
+    return trend > 0 ? { value: trend * rate, currency: market === "uk" ? "GBP" : "EUR" } : null;
+  }
+
+  // Changing a card's finish. If you already have that finish of the card, the two entries are merged.
+  function changeFinish(item, finish) {
+    const newId = item.cardId + "|" + finish;
+    const other = collection.find((entry) => entry.id === newId && entry !== item);
+    if (other) {
+      other.quantity += item.quantity;
+      collection = collection.filter((entry) => entry !== item);
+    } else {
+      item.finish = finish;
+      item.id = newId;
+    }
+    saveCollection();
+    renderCollection();
+  }
+
+  function selectBox(options, current, onPick) {
+    const select = document.createElement("select");
+    for (const [value, label] of options) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      option.selected = value === current;
+      select.append(option);
+    }
+    select.addEventListener("change", () => onPick(select.value));
+    return select;
+  }
+
+  function collectionRow(item, price, currency) {
+    const row = el("article", "", "coll-row");
+    const image = document.createElement("img");
+    image.src = item.image;
+    image.alt = item.name;
+    image.loading = "lazy";
+
+    const info = el("div");
+    info.append(el("h3", item.name));
+    const setLine = el("p", "", "muted set-line");
+    const symbol = document.createElement("img");
+    symbol.src = item.symbol;
+    symbol.alt = "";
+    symbol.className = "set-symbol";
+    setLine.append(symbol, item.setName + " (" + item.year + ")");
+    info.append(setLine);
+    info.append(el("p", "Number " + item.number + " of " + item.total + (item.rarity ? ", " + item.rarity : ""), "muted"));
+
+    const finishes = item.finishes && item.finishes.length ? item.finishes : [item.finish];
+    const finishOptions = finishes.map((key) => [key, VARIANT_NAMES[key] || key]);
+    const picks = el("div", "", "coll-picks");
+    if (finishes.length > 1) picks.append(selectBox(finishOptions, item.finish, (value) => changeFinish(item, value)));
+    else picks.append(el("span", VARIANT_NAMES[item.finish] || item.finish, "tag"));
+    picks.append(selectBox(CONDITIONS.map((c) => [c, c]), item.condition, (value) => { item.condition = value; saveCollection(); }));
+    info.append(picks);
+
+    const qty = el("div", "", "qty");
+    const minus = el("button", "−", "secondary");
+    minus.type = "button";
+    minus.setAttribute("aria-label", "One fewer");
+    minus.disabled = item.quantity <= 1;
+    minus.addEventListener("click", () => { item.quantity -= 1; saveCollection(); updateTabs(); renderCollection(); });
+    const plus = el("button", "+", "secondary");
+    plus.type = "button";
+    plus.setAttribute("aria-label", "One more");
+    plus.addEventListener("click", () => { item.quantity += 1; saveCollection(); updateTabs(); renderCollection(); });
+    qty.append(minus, el("span", String(item.quantity), "qty-number"), plus);
+    info.append(qty);
+
+    info.append(el("p", price
+      ? money(price.value, currency) + " each" + (item.quantity > 1 ? ", " + money(price.value * item.quantity, currency) + " total" : "")
+      : "No price in this market", price ? "price coll-price" : "muted"));
+
+    const remove = el("button", "Remove", "secondary remove");
+    remove.type = "button";
+    remove.addEventListener("click", () => {
+      if (!confirm("Remove " + item.name + " from your collection?")) return;
+      collection = collection.filter((entry) => entry !== item);
+      saveCollection();
+      updateTabs();
+      renderCollection();
+    });
+    info.append(remove);
+    row.append(image, info);
+    return row;
+  }
+
+  // Draws the Collection tab: the totals, then one row per card.
+  function renderCollection() {
+    const market = currentMarket();
+    const currency = market === "us" ? "USD" : market === "uk" ? "GBP" : "EUR";
+    collectionList.replaceChildren();
+    let total = 0, unpriced = 0;
+    for (const item of collection) {
+      const price = itemPrice(item, market);
+      if (price) total += price.value * item.quantity;
+      else unpriced += item.quantity;
+      collectionList.append(collectionRow(item, price, currency));
+    }
+    if (collection.length === 0) {
+      collectionSummary.textContent = "Nothing here yet. Scan a card and tap Add to collection.";
+    } else if (market === "uk" && !eurToGbp) {
+      collectionSummary.textContent = collectionCount() + " cards. The exchange rate didn’t load, so try the EU view for now.";
+    } else {
+      collectionSummary.textContent = collectionCount() + " cards (" + collection.length + " different). Estimated value: " + money(total, currency) +
+        (unpriced ? ". " + unpriced + " without a price in this market" : "") +
+        ". These are market prices, not adjusted for condition.";
+    }
+    updateTabs();
+  }
+
+  // Looks up the latest prices for every card in the collection, one at a time.
+  async function refreshPrices() {
+    const ids = [...new Set(collection.map((item) => item.cardId))];
+    if (!ids.length) return;
+    refreshButton.disabled = true;
+    let done = 0;
+    try {
+      for (const id of ids) {
+        collectionStatus.textContent = "Refreshing prices… " + (done + 1) + " of " + ids.length;
+        const response = await fetch("https://api.pokemontcg.io/v2/cards/" + encodeURIComponent(id), { headers: API_KEY ? { "X-Api-Key": API_KEY } : {} });
+        if (response.status === 429) { collectionStatus.textContent = "Too many searches right now. The prices refreshed so far were kept. Try again in a minute."; break; }
+        if (response.ok) {
+          const card = (await response.json()).data;
+          for (const item of collection.filter((entry) => entry.cardId === id)) {
+            item.prices = { us: (card.tcgplayer && card.tcgplayer.prices) || null, eu: (card.cardmarket && card.cardmarket.prices) || null };
+            item.finishes = finishKeys(card);
+            item.priceDate = new Date().toISOString().slice(0, 10);
+          }
+        }
+        done++;
+        if (done === ids.length) collectionStatus.textContent = "Prices updated for " + done + " cards.";
+      }
+    } catch (error) {
+      collectionStatus.textContent = "Couldn’t reach the price service. Try again later.";
+    }
+    saveCollection();
+    renderCollection();
+    refreshButton.disabled = false;
+  }
+
+  // Saves a file to the phone's Downloads.
+  function downloadFile(filename, text, type) {
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(new Blob([text], { type: type }));
+    link.download = filename;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 5000);
+  }
+
+  function exportBackup() {
+    downloadFile("card-collection-backup.json", JSON.stringify({ app: "card-value-finder", saved: new Date().toISOString(), items: collection }), "application/json");
+    collectionStatus.textContent = "Backup saved to your Downloads. Keep it somewhere safe.";
+  }
+
+  // A spreadsheet-friendly list, with values in the market that is selected.
+  function exportCsv() {
+    const market = currentMarket();
+    const cell = (value) => '"' + String(value).replace(/"/g, '""') + '"';
+    const lines = [["Name", "Set", "Year", "Number", "Set size", "Rarity", "Finish", "Condition", "Quantity", "Price each", "Total", "Currency", "Price date"].map(cell).join(",")];
+    for (const item of collection) {
+      const price = itemPrice(item, market);
+      lines.push([item.name, item.setName, item.year, item.number, item.total, item.rarity, VARIANT_NAMES[item.finish] || item.finish, item.condition, item.quantity,
+        price ? price.value.toFixed(2) : "", price ? (price.value * item.quantity).toFixed(2) : "", price ? price.currency : "", item.priceDate || ""].map(cell).join(","));
+    }
+    downloadFile("card-collection.csv", lines.join("\r\n"), "text/csv");
+    collectionStatus.textContent = "Spreadsheet saved to your Downloads.";
+  }
+
+  // Restores a backup file. Cards already in the collection are kept, and if both have the same card
+  // the larger quantity is kept, so restoring the same backup twice never doubles anything.
+  async function importBackup(file) {
+    try {
+      const data = JSON.parse(await file.text());
+      const items = Array.isArray(data) ? data : data.items;
+      if (!Array.isArray(items)) throw new Error("not a backup");
+      let added = 0, updated = 0;
+      for (const item of items) {
+        if (!item || !item.id || !item.name || !item.prices || !(item.quantity >= 1)) continue;
+        const existing = collection.find((entry) => entry.id === item.id);
+        if (!existing) { collection.push(item); added++; }
+        else if (item.quantity > existing.quantity) { existing.quantity = item.quantity; updated++; }
+      }
+      saveCollection();
+      renderCollection();
+      collectionStatus.textContent = "Backup restored: " + added + " new, " + updated + " updated.";
+    } catch (error) {
+      collectionStatus.textContent = "That file doesn’t look like a backup from this page.";
+    }
+  }
+
+  // ---------- BULK SCAN ----------
+  let batchJobs = [];
+  let batchRunning = false;
+  let batchStop = false;
+  let wakeLock = null;
+
+  // Keeps the screen from switching off while photos are being read.
+  async function keepAwake() {
+    try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request("screen"); } catch (error) { wakeLock = null; }
+  }
+  function letSleep() {
+    if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+  }
+
+  // A small picture of the photo to show in the list, so the big photo can be let go of.
+  function makeThumb(image) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 84;
+    canvas.height = Math.round(84 * image.naturalHeight / image.naturalWidth);
+    canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", 0.6);
+  }
+
+  // A scan is trusted enough to add without asking only when the name AND the number both agree with the card.
+  function isConfident(card, clues) {
+    return !!(card && clues.number && clues.nameConfident && nameMatches(card.name, clues.name) &&
+      String(card.number).replace(/^0+/, "").toLowerCase() === clues.number.replace(/^0+/, "").toLowerCase());
+  }
+
+  const JOB_MARKS = { queued: "…", reading: "…", added: "✓", review: "⚠", failed: "✕", stopped: "–" };
+
+  function batchRow(job) {
+    const row = el("article", "", "batch-row " + job.status);
+    const thumb = document.createElement("img");
+    if (job.thumb) thumb.src = job.thumb;
+    thumb.alt = "";
+    const info = el("div");
+    info.append(el("p", JOB_MARKS[job.status] + " " + job.title, "batch-title"));
+    if (job.message) info.append(el("p", job.message, "muted"));
+    if (job.status === "review") {
+      for (const card of job.candidates) {
+        const button = el("button", "Add " + card.name + ", number " + card.number + " of " + card.set.printedTotal + " (" + card.set.name + ", " + card.set.releaseDate.slice(0, 4) + ")", "secondary candidate");
+        button.type = "button";
+        button.addEventListener("click", () => {
+          addToCollection(card, defaultFinish(card), 1);
+          job.status = "added";
+          job.title = card.name + " " + card.number + "/" + card.set.printedTotal;
+          job.message = "Added to your collection (you chose this one).";
+          job.candidates = [];
+          updateJob(job);
+          renderBatchHead();
+        });
+        info.append(button);
+      }
+    }
+    if ((job.status === "review" || job.status === "failed") && job.raw) {
+      const details = el("details");
+      details.append(el("summary", "Show the raw reading"));
+      details.append(el("pre", job.raw));
+      info.append(details);
+    }
+    if (job.status === "failed") {
+      const manual = el("button", "Search for it by hand", "secondary candidate");
+      manual.type = "button";
+      manual.addEventListener("click", () => { showView("scan"); nameInput.focus(); });
+      info.append(manual);
+    }
+    row.append(thumb, info);
+    return row;
+  }
+
+  function updateJob(job) {
+    const fresh = batchRow(job);
+    if (job.el) job.el.replaceWith(fresh);
+    job.el = fresh;
+  }
+
+  function renderBatchHead() {
+    const count = (status) => batchJobs.filter((job) => job.status === status).length;
+    const finished = batchJobs.length - count("queued") - count("reading") - count("stopped");
+    if (batchRunning) {
+      batchHead.textContent = "Scanning photo " + Math.min(finished + 1, batchJobs.length) + " of " + batchJobs.length + ". Keep this page open and the screen on.";
+    } else {
+      batchHead.textContent = "Finished: " + count("added") + " added, " + count("review") + " to check, " + count("failed") + " couldn’t be read" +
+        (count("stopped") ? ", " + count("stopped") + " skipped" : "") + ".";
+    }
+    stopButton.hidden = !batchRunning;
+  }
+
+  // Works through the chosen photos one at a time.
+  async function runBatch(files) {
+    if (batchRunning) { statusLine.textContent = "A bulk scan is already running."; return; }
+    batchJobs = files.map((file, index) => ({ file: file, status: "queued", title: "Photo " + (index + 1), message: "Waiting…", thumb: "", candidates: [], raw: "" }));
+    batchList.replaceChildren();
+    batchRunning = true;
+    batchStop = false;
+    for (const job of batchJobs) { job.el = batchRow(job); batchList.append(job.el); }
+    batchBox.hidden = false;
+    renderBatchHead();
+    await keepAwake();
+
+    let worker;
+    try {
+      worker = await Tesseract.createWorker("eng"); // one reader is shared by every photo
+      for (const job of batchJobs) {
+        if (batchStop) { job.status = "stopped"; job.message = "Skipped (stopped)."; updateJob(job); continue; }
+        job.status = "reading";
+        job.message = "Reading…";
+        updateJob(job);
+        renderBatchHead();
+        let image;
+        try {
+          image = await loadImage(job.file);
+          job.thumb = makeThumb(image);
+          const clues = await scanImage(worker, image, (text) => { job.message = text.replace("Reading the card… ", ""); updateJob(job); });
+          job.raw = clues.raw;
+          const parsed = parseInputs(clues.name, clues.numberText);
+          if (!clues.numberText && clues.name.length < 3) {
+            job.status = "failed";
+            job.title = "Photo " + (batchJobs.indexOf(job) + 1);
+            job.message = "Couldn’t find a number or a name in this photo.";
+          } else {
+            job.message = "Looking up the card…";
+            updateJob(job);
+            const found = await searchCards(parsed.name, parsed.number, parsed.total, clues);
+            if (found.rateLimited) {
+              job.status = "failed";
+              job.message = "Too many searches right now, so the bulk scan has paused. Wait a minute, then scan these again.";
+              batchStop = true;
+            } else if (!found.cards.length) {
+              job.status = "failed";
+              job.message = "Read " + (clues.summary || clues.name) + ", but no matching card was found.";
+            } else {
+              const ranked = rankCards(found.cards, clues).slice(0, 4);
+              if (isConfident(ranked[0], clues)) {
+                const item = addToCollection(ranked[0], defaultFinish(ranked[0]), 1);
+                job.status = "added";
+                job.title = ranked[0].name + " " + ranked[0].number + "/" + ranked[0].set.printedTotal;
+                job.message = ranked[0].set.name + ". You now have " + item.quantity + ".";
+              } else {
+                job.status = "review";
+                job.candidates = ranked;
+                job.title = clues.name || "Photo " + (batchJobs.indexOf(job) + 1);
+                job.message = "Not sure enough to add this automatically (read: " + (clues.summary || "nothing clear") + "). Pick the right card, if it’s here.";
+              }
+            }
+          }
+        } catch (error) {
+          job.status = "failed";
+          job.message = "Something went wrong with this photo or the connection.";
+        }
+        if (image) URL.revokeObjectURL(image.src);
+        updateJob(job);
+        renderBatchHead();
+      }
+    } catch (error) {
+      for (const job of batchJobs) if (job.status === "queued") { job.status = "failed"; job.message = "The text reader couldn’t start. Check your connection."; updateJob(job); }
+    } finally {
+      if (worker) await worker.terminate();
+      letSleep();
+      batchRunning = false;
+      renderBatchHead();
+      renderCollection();
+    }
+  }
+
+  // ---------- TABS AND BUTTONS ----------
+  function showView(name) {
+    viewScan.hidden = name !== "scan";
+    viewCollection.hidden = name !== "collection";
+    scanTab.setAttribute("aria-selected", String(name === "scan"));
+    collectionTab.setAttribute("aria-selected", String(name === "collection"));
+    if (name === "collection") renderCollection();
+  }
+  scanTab.addEventListener("click", () => showView("scan"));
+  collectionTab.addEventListener("click", () => showView("collection"));
+  refreshButton.addEventListener("click", refreshPrices);
+  document.getElementById("export-json").addEventListener("click", exportBackup);
+  document.getElementById("export-csv").addEventListener("click", exportCsv);
+  document.getElementById("import-file").addEventListener("change", (event) => {
+    const file = event.target.files[0];
+    event.target.value = "";
+    if (file) importBackup(file);
+  });
+  stopButton.addEventListener("click", () => { batchStop = true; stopButton.hidden = true; });
+  bulkInput.addEventListener("change", () => {
+    const files = [...bulkInput.files];
+    bulkInput.value = "";
+    if (files.length) runBatch(files);
+  });
 
   // When the page opens: show the market note and fetch the exchange rate.
   const speciesReady = loadSpecies();
   updateNote(currentMarket());
-  loadRate().then(() => updateNote(currentMarket()));
+  renderCollection();
+  loadRate().then(() => { updateNote(currentMarket()); renderCollection(); });
 </script>
 </body>
 </html>
