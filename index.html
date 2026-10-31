@@ -767,20 +767,22 @@
   //   [which part of the bottom edge, where the strip starts, strip height,
   //    reading mode, text height in pixels, flip light and dark?, contrast (1 = none)]
   const NUMBER_ATTEMPTS = [
-    ["full", 0.86, 0.14, "6", 300, false, 1.4],
+    ["full", 0.84, 0.16, "6", 350, false, 1.4],
+    ["full", 0.80, 0.20, "6", 300, false, 1],
+    ["full", 0.82, 0.18, "6", 400, false, 1.4],
+    ["full", 0.82, 0.18, "6", 350, false, 1],
     ["right", 0.88, 0.10, "6", 400, false, 1.4],
+    ["full", 0.86, 0.14, "6", 300, false, 1.4],
     ["full", 0.86, 0.14, "11", 400, false, 1.4],
     ["left", 0.86, 0.14, "11", 400, false, 1.4],
     ["right", 0.88, 0.10, "6", 400, false, 1],
     ["full", 0.88, 0.10, "11", 250, false, 1],
+    ["full", 0.82, 0.18, "6", 330, false, 1.4],
+    ["full", 0.82, 0.18, "6", 380, false, 1.4],
+    ["full", 0.84, 0.16, "6", 320, false, 1],
+    ["full", 0.84, 0.16, "6", 420, false, 1.4],
     ["full", 0.86, 0.14, "11", 300, true, 1.4],
-    ["full", 0.86, 0.14, "6", 220, false, 1.4],
-    ["full", 0.86, 0.14, "11", 520, false, 1.4],
-    ["left", 0.86, 0.14, "11", 520, false, 1.4],
-    ["full", 0.78, 0.22, "6", 470, false, 1.4],
-    ["full", 0.78, 0.22, "11", 470, false, 1.4],
-    ["left", 0.86, 0.14, "6", 300, true, 1.4],
-    ["right", 0.86, 0.14, "11", 160, false, 1.4]
+    ["full", 0.86, 0.14, "6", 220, false, 1.4]
   ];
   const SIDE_NAMES = { full: "bottom edge", left: "bottom-left corner", right: "bottom-right corner" };
 
@@ -790,7 +792,10 @@
   // Several readings of the number can disagree (for example "4/114" and "34/114").
   // The reading that most attempts agree on wins. If they tie, the one with more digits wins,
   // because a digit lost in a misreading is more common than one invented.
-  function pickConsensus(hits) {
+  function pickConsensus(allHits) {
+    // Set sizes are between about 10 and 320, so something like 998 is a misread symbol and is set aside.
+    const sensible = allHits.filter((hit) => Number(hit.info.total) >= 10 && Number(hit.info.total) <= 320);
+    const hits = sensible.length ? sensible : allHits;
     const groups = {};
     for (const hit of hits) {
       const key = hit.info.number.replace(/^0+/, "") + "/" + hit.info.total.replace(/^0+/, "");
@@ -981,6 +986,9 @@
     // Warn when the name read from the photo doesn't fit the card found. The number may be misread.
     if (card && clues.name && clues.name.length >= 3 && !nameMatches(card.name, clues.name)) {
       box.append(el("p", "The name read from the photo (“" + clues.name + "”) doesn’t match this card, so the number may have been misread. Check the boxes above and search again.", "warn"));
+    }
+    if (card && !clues.numberText) {
+      box.append(el("p", "The number wasn’t found, so these are cards with that name. Compare the set symbol and number on your card with the results below.", "warn"));
     }
     if (!card) {
       box.append(el("p", clues.numberText ? "No matching card found. Check the boxes above." : "The number wasn’t found. Type it into the box above, or retake the photo.", "warn"));
