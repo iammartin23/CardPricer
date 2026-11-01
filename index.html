@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  CARD VALUE FINDER (camera scan, bulk scan and a saved collection)
+  CARD VALUE FINDER (camera scan, auto-scan camera, bulk scan and a saved collection)
   This one file is the whole app. It has three parts:
     1. HTML  (between <body> and </body>)  = what is on the page
     2. CSS   (inside <style>)              = how it looks
@@ -176,6 +176,26 @@
   .candidate { display: block; width: 100%; margin-top: 8px; padding: 8px 12px; text-align: left; font-weight: 600; font-size: 0.9rem; }
   .batch details { margin-top: 8px; font-size: 0.85rem; color: var(--muted); }
   .batch pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.75rem; max-height: 12em; overflow: auto; }
+  /* The auto-scan camera. */
+  [hidden] { display: none !important; }
+  .auto { position: fixed; inset: 0; z-index: 50; background: #000; color: #fff; display: flex; flex-direction: column; }
+  .auto-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; }
+  .auto-top p { margin: 0; font-weight: 800; font-size: 1.05rem; }
+  .auto .secondary { color: #fff; border-color: #fff; }
+  .auto-frame { position: relative; margin: 0 auto; background: #111; overflow: hidden; flex: none; }
+  .auto-frame video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .auto-guide { position: absolute; border: 3px solid #fff; border-radius: 12px; box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.4); }
+  .auto-guide.ready { border-color: #2ecc71; }
+  .auto-bar { position: absolute; left: 0; bottom: 0; height: 6px; width: 0; background: #2ecc71; border-radius: 0 0 9px 9px; }
+  .auto-flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; transition: opacity 0.15s; }
+  .auto-flash.on { opacity: 0.85; transition: none; }
+  .auto-bottom { padding: 10px 14px 16px; display: grid; gap: 8px; }
+  .auto-bottom p { margin: 0; font-size: 0.9rem; }
+  .auto-keep { display: flex; gap: 10px; align-items: flex-start; font-weight: 600; font-size: 0.9rem; }
+  .auto-keep input { min-height: 0; width: 22px; height: 22px; flex: none; }
+  .auto-debug { color: #aab; font-size: 0.7rem; }
+  .shutter { background: #fff; color: #000; }
+  .auto-open { grid-column: 1 / -1; }
   .note { margin-top: 24px; font-size: 0.85rem; color: var(--muted); }
 </style>
 </head>
@@ -212,6 +232,7 @@
         <label class="scan-button">Choose a photo
           <input class="photo-input" type="file" accept="image/*">
         </label>
+        <button type="button" id="auto-open" class="auto-open">Auto-scan with camera</button>
         <label class="scan-button scan-many">Scan many photos
           <input id="bulk-input" type="file" accept="image/*" multiple>
         </label>
@@ -266,6 +287,25 @@
   </div>
 </main>
 
+<!-- The auto-scan camera. It covers the whole screen while it is open. -->
+<div id="auto" class="auto" hidden>
+  <div id="auto-top" class="auto-top">
+    <p id="auto-message" role="status">Starting the camera…</p>
+    <button type="button" id="auto-close" class="secondary">Done</button>
+  </div>
+  <div id="auto-frame" class="auto-frame">
+    <video id="auto-video" playsinline muted autoplay></video>
+    <div id="auto-guide" class="auto-guide"><div id="auto-bar" class="auto-bar"></div></div>
+    <div id="auto-flash" class="auto-flash"></div>
+  </div>
+  <div id="auto-bottom" class="auto-bottom">
+    <label class="auto-keep"><input id="auto-keep" type="checkbox"> Keep scanning: read each card in the background and add it to the collection or the review list</label>
+    <p id="auto-count"></p>
+    <p id="auto-debug" class="auto-debug"></p>
+    <button type="button" id="auto-shutter" class="shutter">Take photo now</button>
+  </div>
+</div>
+
 <!-- The free Tesseract.js library, which reads text from images. -->
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 
@@ -296,6 +336,18 @@
   const batchHead = document.getElementById("batch-head");
   const batchList = document.getElementById("batch-list");
   const stopButton = document.getElementById("stop-batch");
+  const autoBox = document.getElementById("auto");
+  const autoTop = document.getElementById("auto-top");
+  const autoBottom = document.getElementById("auto-bottom");
+  const autoFrame = document.getElementById("auto-frame");
+  const autoVideo = document.getElementById("auto-video");
+  const autoGuide = document.getElementById("auto-guide");
+  const autoBar = document.getElementById("auto-bar");
+  const autoFlash = document.getElementById("auto-flash");
+  const autoMessage = document.getElementById("auto-message");
+  const autoCount = document.getElementById("auto-count");
+  const autoDebug = document.getElementById("auto-debug");
+  const autoKeep = document.getElementById("auto-keep");
   const photoInputs = document.querySelectorAll(".photo-input");
 
   // The page remembers the last search, so switching UK / EU / US can redraw it
@@ -1181,10 +1233,8 @@
     };
   }
 
-  // This runs when you take or pick a single photo (both buttons use it).
-  async function readPhoto(input) {
-    const file = input.files[0];
-    if (!file) return;
+  // Reads one photo (or camera picture) of a card and shows the result on the Scan tab.
+  async function scanFile(file) {
     results.replaceChildren();
     summaryBox.replaceChildren();
     statusLine.textContent = "Reading the card… the first scan downloads the text reader and can take a minute.";
@@ -1208,10 +1258,19 @@
       statusLine.textContent = "Couldn’t read that photo. Check your connection, then try again or type the card in.";
     } finally {
       if (worker) await worker.terminate();
-      input.value = ""; // lets you scan the same card again
     }
   }
 
+  // This runs when you take or pick a single photo (both buttons use it).
+  async function readPhoto(input) {
+    const file = input.files[0];
+    if (!file) return;
+    try {
+      await scanFile(file);
+    } finally {
+      input.value = ""; // lets you scan the same card again
+    }
+  }
     photoInputs.forEach((input) => input.addEventListener("change", () => readPhoto(input)));
 
   // ---------- COLLECTION (saved on this phone) ----------
@@ -1488,7 +1547,7 @@
 
   // Keeps the screen from switching off while photos are being read.
   async function keepAwake() {
-    try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request("screen"); } catch (error) { wakeLock = null; }
+    try { if (navigator.wakeLock && !wakeLock) wakeLock = await navigator.wakeLock.request("screen"); } catch (error) { wakeLock = null; }
   }
   function letSleep() {
     if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
@@ -1567,25 +1626,47 @@
         (count("stopped") ? ", " + count("stopped") + " skipped" : "") + ".";
     }
     stopButton.hidden = !batchRunning;
+    if (autoStream) updateAutoCount();
   }
 
-  // Works through the chosen photos one at a time.
-  async function runBatch(files) {
-    if (batchRunning) { statusLine.textContent = "A bulk scan is already running."; return; }
-    batchJobs = files.map((file, index) => ({ file: file, status: "queued", title: "Photo " + (index + 1), message: "Waiting…", thumb: "", candidates: [], raw: "" }));
-    batchList.replaceChildren();
-    batchRunning = true;
-    batchStop = false;
-    for (const job of batchJobs) { job.el = batchRow(job); batchList.append(job.el); }
+  // Adds photos to the bulk scan list and starts reading them if the reader isn't already running.
+  // New photos can be added while it is running (the auto-scan camera does this).
+  let batchPromise = null;
+  function enqueueBatch(files) {
+    if (!batchRunning) { batchJobs = []; batchList.replaceChildren(); }
+    const first = batchJobs.length;
+    files.forEach((file, i) => {
+      const job = { file: file, status: "queued", title: "Photo " + (first + i + 1), message: "Waiting…", thumb: "", candidates: [], raw: "" };
+      batchJobs.push(job);
+      job.el = batchRow(job);
+      batchList.append(job.el);
+    });
     batchBox.hidden = false;
+    if (!batchRunning) {
+      batchRunning = true;
+      batchStop = false;
+      batchPromise = processBatch();
+    }
     renderBatchHead();
-    await keepAwake();
+    return batchPromise;
+  }
 
+  // Works through the waiting photos one at a time.
+  async function processBatch() {
+    await keepAwake();
     let worker;
     try {
       worker = await Tesseract.createWorker("eng"); // one reader is shared by every photo
-      for (const job of batchJobs) {
-        if (batchStop) { job.status = "stopped"; job.message = "Skipped (stopped)."; updateJob(job); continue; }
+      while (true) {
+        const job = batchJobs.find((entry) => entry.status === "queued");
+        if (!job) {
+          if (autoStream) { await new Promise((resolve) => setTimeout(resolve, 300)); continue; } // the camera may send more
+          break;
+        }
+        if (batchStop) {
+          for (const entry of batchJobs) if (entry.status === "queued") { entry.status = "stopped"; entry.message = "Skipped (stopped)."; updateJob(entry); }
+          break;
+        }
         job.status = "reading";
         job.message = "Reading…";
         updateJob(job);
@@ -1599,7 +1680,6 @@
           const parsed = parseInputs(clues.name, clues.numberText);
           if (!clues.numberText && clues.name.length < 3) {
             job.status = "failed";
-            job.title = "Photo " + (batchJobs.indexOf(job) + 1);
             job.message = "Couldn’t find a number or a name in this photo.";
           } else {
             job.message = "Looking up the card…";
@@ -1622,7 +1702,7 @@
               } else {
                 job.status = "review";
                 job.candidates = ranked;
-                job.title = clues.name || "Photo " + (batchJobs.indexOf(job) + 1);
+                job.title = clues.name || job.title;
                 job.message = "Not sure enough to add this automatically (read: " + (clues.summary || "nothing clear") + "). Pick the right card, if it’s here.";
               }
             }
@@ -1631,7 +1711,7 @@
           job.status = "failed";
           job.message = "Something went wrong with this photo or the connection.";
         }
-        if (image) URL.revokeObjectURL(image.src);
+        if (image && image.src) URL.revokeObjectURL(image.src);
         updateJob(job);
         renderBatchHead();
       }
@@ -1639,43 +1719,288 @@
       for (const job of batchJobs) if (job.status === "queued") { job.status = "failed"; job.message = "The text reader couldn’t start. Check your connection."; updateJob(job); }
     } finally {
       if (worker) await worker.terminate();
-      letSleep();
       batchRunning = false;
+      if (!autoStream) letSleep();
       renderBatchHead();
       renderCollection();
     }
   }
+
+  // ---------- AUTO-SCAN (a live camera that takes the photo by itself) ----------
+  // Every moment the camera view is checked for five things: is the card's edge on the outline, is it
+  // square and centred, is it in focus, is it held steady, and is there too much glare.
+  // When all five are fine for about a second, the photo is taken. If it never fires on your phone,
+  // these numbers can be loosened (bigger tolerance numbers = less fussy).
+  const AUTO = {
+    analysisWidth: 320,   // the camera view is shrunk to this width for checking
+    tickMs: 140,          // how often the view is checked
+    holdMs: 900,          // how long everything must be fine before the photo is taken
+    minEdge: 0.07,        // how clear the card's edge must be against the background
+    sizeTol: 0.035,       // how far the card may be too big or too small (as a share of its size)
+    shiftTol: 0.03,       // how far off-centre
+    tiltTol: 0.03,        // how crooked
+    glareMax: 0.04,       // the share of the card allowed to be bright white glare
+    motionMax: 3.5,       // how much the picture may move between checks
+    minSharp: 8           // the least sharpness that counts as in focus
+  };
+  const CARD_RATIO = 63 / 88; // a card is 63 mm wide and 88 mm tall
+
+  // Where the on-screen outline sits inside the camera view, as pixel positions.
+  function guideRect(w, h) {
+    let gh = h * 0.84, gw = gh * CARD_RATIO;
+    if (gw > w * 0.9) { gw = w * 0.9; gh = gw / CARD_RATIO; }
+    return { x0: (w - gw) / 2, y0: (h - gh) / 2, x1: (w + gw) / 2, y1: (h + gh) / 2 };
+  }
+
+  // Looks across one side of the outline for the strongest change in colour, which is the card's edge.
+  // Returns how strong it is, where it is compared with the outline (as a share of the card's size, outward is positive),
+  // and how much its position differs between the two halves of that side (a crooked card differs).
+  function findEdge(rgba, w, h, g, side) {
+    const horizontal = side === "top" || side === "bottom";
+    const gw = g.x1 - g.x0, gh = g.y1 - g.y0;
+    const across = horizontal ? gh : gw; // the edge can be found within 7% of the card's size either way
+    const range = Math.max(3, Math.round(0.07 * across));
+    const base = side === "left" ? g.x0 : side === "right" ? g.x1 : side === "top" ? g.y0 : g.y1;
+    const from = Math.round(horizontal ? g.x0 + 0.12 * gw : g.y0 + 0.12 * gh);
+    const to = Math.round(horizontal ? g.x1 - 0.12 * gw : g.y1 - 0.12 * gh);
+    const middle = (from + to) / 2;
+    const at = (along, across) => 4 * (horizontal ? across * w + along : along * w + across);
+    let best = { strength: 0, d: 0 }, bestA = { strength: 0, d: 0 }, bestB = { strength: 0, d: 0 };
+    let bestPos = 0, minPos = Infinity, maxPos = -Infinity, clipped = false;
+    for (let d = -range; d <= range; d++) {
+      const pos = Math.round(base + d);
+      if (pos - 3 < 0 || pos + 3 > (horizontal ? h : w)) { clipped = true; continue; } // this position is off the edge of the picture
+      minPos = Math.min(minPos, pos); maxPos = Math.max(maxPos, pos);
+      let sum = 0, n = 0, sumA = 0, nA = 0, sumB = 0, nB = 0;
+      for (let t = from; t < to; t += 2) {
+        let diff = 0;
+        for (let k = 1; k <= 3; k++) {
+          const a = at(t, pos - k), b = at(t, pos + k - 1);
+          diff += Math.abs(rgba[a] - rgba[b]) + Math.abs(rgba[a + 1] - rgba[b + 1]) + Math.abs(rgba[a + 2] - rgba[b + 2]);
+        }
+        diff /= 9 * 255;
+        sum += diff; n++;
+        if (t < middle) { sumA += diff; nA++; } else { sumB += diff; nB++; }
+      }
+      const outward = (side === "left" || side === "top") ? -d : d;
+      if (sum / n > best.strength) { best = { strength: sum / n, d: outward }; bestPos = pos; }
+      if (nA && sumA / nA > bestA.strength) bestA = { strength: sumA / nA, d: outward };
+      if (nB && sumB / nB > bestB.strength) bestB = { strength: sumB / nB, d: outward };
+    }
+    // If the strongest edge is right at the limit of what the picture shows, the card is partly out of view.
+    if (clipped && (bestPos <= minPos + 1 || bestPos >= maxPos - 1)) best.strength = 0;
+    return { strength: best.strength, d: best.d / across, tilt: Math.abs(bestA.d - bestB.d) / across };
+  }
+
+  // Measures how well the card sits in the outline, from one camera frame.
+  // rgba = the frame's pixels (w by h). prevGray = the grey picture from the check before, or null.
+  function analyseFrame(rgba, w, h, prevGray) {
+    const g = guideRect(w, h);
+    const gw = g.x1 - g.x0;
+    const gray = new Uint8Array(w * h);
+    for (let i = 0, p = 0; i < gray.length; i++, p += 4) gray[i] = (rgba[p] * 77 + rgba[p + 1] * 150 + rgba[p + 2] * 29) >> 8;
+
+    // 1. Where the four edges are
+    const left = findEdge(rgba, w, h, g, "left"), right = findEdge(rgba, w, h, g, "right");
+    const top = findEdge(rgba, w, h, g, "top"), bottom = findEdge(rgba, w, h, g, "bottom");
+    const strength = Math.min(left.strength, right.strength, top.strength, bottom.strength);
+    // Positive "grow" means the card is bigger than the outline (too close). "shift" is how far off-centre.
+    const grow = (left.d + right.d + top.d + bottom.d) / 4;
+    const shiftX = (right.d - left.d) / 2, shiftY = (bottom.d - top.d) / 2;
+    const tilt = Math.max(left.tilt, right.tilt, top.tilt, bottom.tilt);
+
+    // 2. Sharpness, motion and glare, measured inside the outline
+    const ix0 = Math.round(g.x0 + 0.1 * gw), ix1 = Math.round(g.x1 - 0.1 * gw);
+    const iy0 = Math.round(g.y0 + 0.1 * (g.y1 - g.y0)), iy1 = Math.round(g.y1 - 0.1 * (g.y1 - g.y0));
+    let lapSum = 0, lapSq = 0, lapN = 0, diffSum = 0, diffN = 0, bright = 0, total = 0;
+    for (let y = iy0; y < iy1; y++) {
+      for (let x = ix0; x < ix1; x++) {
+        const i = y * w + x;
+        const lap = 4 * gray[i] - gray[i - 1] - gray[i + 1] - gray[i - w] - gray[i + w];
+        lapSum += lap; lapSq += lap * lap; lapN++;
+        if (prevGray && (x & 1) === 0 && (y & 1) === 0) { diffSum += Math.abs(gray[i] - prevGray[i]); diffN++; }
+        const p = i * 4;
+        if (Math.min(rgba[p], rgba[p + 1], rgba[p + 2]) >= 240) bright++;
+        total++;
+      }
+    }
+    return {
+      gray: gray,
+      metrics: {
+        strength: strength, grow: grow, shiftX: shiftX, shiftY: shiftY, tilt: tilt,
+        sharp: lapN ? lapSq / lapN - Math.pow(lapSum / lapN, 2) : 0,
+        motion: diffN ? diffSum / diffN : 99,
+        glare: total ? bright / total : 0
+      }
+    };
+  }
+
+  // Decides what to do with one check's measurements. "state" remembers things between checks.
+  // Returns { message, ready, progress, capture }. Capture is true once everything has been fine for long enough.
+  function stepAuto(state, m, now) {
+    state.sharpPeak = Math.max(m.sharp, (state.sharpPeak || 0) * 0.98); // the sharpest recent look, slowly forgotten
+    let message = "";
+    if (m.strength < AUTO.minEdge) message = "Fit the card inside the outline";
+    else if (m.tilt > AUTO.tiltTol) message = "Hold the phone flat over the card";
+    else if (m.grow > AUTO.sizeTol) message = "Move back a little";
+    else if (m.grow < -AUTO.sizeTol) message = "Move closer";
+    else if (Math.abs(m.shiftX) > AUTO.shiftTol || Math.abs(m.shiftY) > AUTO.shiftTol) message = "Centre the card in the outline";
+    else if (m.glare > AUTO.glareMax) message = "Tilt the card to cut the glare";
+    else if (m.motion > AUTO.motionMax) message = "Hold steady…";
+    else if (m.sharp < AUTO.minSharp || m.sharp < 0.8 * state.sharpPeak) message = "Focusing…";
+
+    // After a photo in keep-scanning mode, wait for the card to be taken away before looking for the next one.
+    if (state.waitForClear) {
+      if (m.strength < AUTO.minEdge || m.motion > 10) state.clearSince = state.clearSince || now;
+      else state.clearSince = 0;
+      if (state.clearSince && now - state.clearSince > 500) { state.waitForClear = false; state.clearSince = 0; }
+      return { message: "Next card…", ready: false, progress: 0, capture: false };
+    }
+    if (message) { state.goodSince = 0; return { message: message, ready: false, progress: 0, capture: false }; }
+    if (!state.goodSince) state.goodSince = now;
+    const progress = Math.min(1, (now - state.goodSince) / AUTO.holdMs);
+    return { message: progress < 1 ? "Hold still…" : "Got it!", ready: true, progress: progress, capture: progress >= 1 };
+  }
+
+  // ---- the live camera view ----
+  let autoStream = null, autoTimer = null, autoState = null, autoPrev = null, autoBusy = false, autoCaptured = 0;
+  let autoCanvas = null;
+
+  // Sizes the camera view to fit the screen, and places the outline over it.
+  function layoutAuto() {
+    const vw = autoVideo.videoWidth, vh = autoVideo.videoHeight;
+    if (!vw || !vh) return;
+    const availW = window.innerWidth;
+    const availH = window.innerHeight - autoTop.offsetHeight - autoBottom.offsetHeight;
+    const fit = Math.min(availW / vw, Math.max(availH, 200) / vh);
+    autoFrame.style.width = Math.floor(vw * fit) + "px";
+    autoFrame.style.height = Math.floor(vh * fit) + "px";
+    const g = guideRect(vw, vh);
+    autoGuide.style.left = (g.x0 / vw * 100) + "%";
+    autoGuide.style.top = (g.y0 / vh * 100) + "%";
+    autoGuide.style.width = ((g.x1 - g.x0) / vw * 100) + "%";
+    autoGuide.style.height = ((g.y1 - g.y0) / vh * 100) + "%";
+  }
+
+  function updateAutoCount() {
+    const count = (status) => batchJobs.filter((job) => job.status === status).length;
+    const pending = count("queued") + count("reading");
+    autoCount.textContent = autoCaptured && autoKeep.checked
+      ? "Captured " + autoCaptured + ": " + count("added") + " added, " + count("review") + " to check, " + count("failed") + " couldn’t be read" + (pending ? ", " + pending + " still reading" : "") + "."
+      : "";
+  }
+
+  // Takes a full-size picture from the camera, cropped to the outline with a small margin.
+  // This keeps the card filling the picture, which makes it easier to read.
+  function grabStill() {
+    const vw = autoVideo.videoWidth, vh = autoVideo.videoHeight, g = guideRect(vw, vh);
+    const padX = (g.x1 - g.x0) * 0.04, padY = (g.y1 - g.y0) * 0.04;
+    const sx = Math.max(0, g.x0 - padX), sy = Math.max(0, g.y0 - padY);
+    const sw = Math.min(vw, g.x1 + padX) - sx, sh = Math.min(vh, g.y1 + padY) - sy;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(sw);
+    canvas.height = Math.round(sh);
+    canvas.getContext("2d").drawImage(autoVideo, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+    return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
+  }
+
+  // Takes the photo (by itself, or when you tap the button) and sends it to be read.
+  async function captureNow() {
+    if (autoBusy || !autoStream) return;
+    autoBusy = true;
+    try {
+      autoFlash.classList.add("on");
+      setTimeout(() => autoFlash.classList.remove("on"), 150);
+      if (navigator.vibrate) navigator.vibrate(60);
+      const blob = await grabStill();
+      autoCaptured++;
+      if (autoKeep.checked) {
+        enqueueBatch([blob]); // read in the background while the camera stays open
+        autoState.waitForClear = true;
+        autoState.goodSince = 0;
+        autoState.since = performance.now();
+        updateAutoCount();
+      } else {
+        closeAuto();
+        autoBusy = false;
+        await scanFile(blob);
+      }
+    } finally {
+      autoBusy = false;
+    }
+  }
+
+  // Runs a few times a second while the camera is open: measures the view and decides what to say or do.
+  function autoTick() {
+    if (autoBusy || !autoStream || !autoVideo.videoWidth) return;
+    const vw = autoVideo.videoWidth, vh = autoVideo.videoHeight;
+    const w = AUTO.analysisWidth, h = Math.round(w * vh / vw);
+    autoCanvas = autoCanvas || document.createElement("canvas");
+    if (autoCanvas.width !== w || autoCanvas.height !== h) { autoCanvas.width = w; autoCanvas.height = h; }
+    const ctx = autoCanvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(autoVideo, 0, 0, w, h);
+    const analysed = analyseFrame(ctx.getImageData(0, 0, w, h).data, w, h, autoPrev && autoPrev.length === w * h ? autoPrev : null);
+    autoPrev = analysed.gray;
+    const now = performance.now();
+    const m = analysed.metrics;
+    const verdict = stepAuto(autoState, m, now);
+    const stuck = !verdict.ready && now - autoState.since > 12000;
+    autoMessage.textContent = verdict.message + (stuck ? " (or tap Take photo now)" : "");
+    autoGuide.classList.toggle("ready", verdict.ready);
+    autoBar.style.width = Math.round(verdict.progress * 100) + "%";
+    autoDebug.textContent = "edges " + m.strength.toFixed(2) + ", size " + (m.grow * 100).toFixed(1) + "%, off-centre " + (m.shiftX * 100).toFixed(1) + "/" + (m.shiftY * 100).toFixed(1) +
+      "%, crooked " + (m.tilt * 100).toFixed(1) + "%, glare " + (m.glare * 100).toFixed(0) + "%, movement " + m.motion.toFixed(1) + ", sharpness " + m.sharp.toFixed(0) + "/" + autoState.sharpPeak.toFixed(0);
+    if (verdict.capture) captureNow();
+  }
+
+  async function openAuto() {
+    if (autoStream) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      statusLine.textContent = "This browser can’t open the camera from the page. Use Take a photo instead.";
+      return;
+    }
+    try {
+      autoStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 3840 }, height: { ideal: 2160 } }, audio: false
+      });
+    } catch (error) {
+      statusLine.textContent = "Couldn’t open the camera. Allow camera access for this site in your browser settings, or use Take a photo instead.";
+      return;
+    }
+    autoVideo.srcObject = autoStream;
+    autoBox.hidden = false;
+    autoMessage.textContent = "Starting the camera…";
+    try { await autoVideo.play(); } catch (error) { /* some browsers start playing by themselves */ }
+    if (!autoVideo.videoWidth) await new Promise((resolve) => autoVideo.addEventListener("loadedmetadata", resolve, { once: true }));
+    layoutAuto();
+    autoState = { since: performance.now() };
+    autoPrev = null;
+    autoCaptured = 0;
+    updateAutoCount();
+    autoTimer = setInterval(autoTick, AUTO.tickMs);
+    await keepAwake();
+  }
+
+  function closeAuto() {
+    clearInterval(autoTimer);
+    autoTimer = null;
+    if (autoStream) autoStream.getTracks().forEach((track) => track.stop());
+    autoStream = null;
+    autoVideo.srcObject = null;
+    autoBox.hidden = true;
+    if (!batchRunning) letSleep();
+  }
+
+  document.getElementById("auto-open").addEventListener("click", openAuto);
+  document.getElementById("auto-close").addEventListener("click", closeAuto);
+  document.getElementById("auto-shutter").addEventListener("click", captureNow);
+  autoKeep.addEventListener("change", updateAutoCount);
+  window.addEventListener("resize", layoutAuto);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) closeAuto(); });
 
   // ---------- TABS AND BUTTONS ----------
   function showView(name) {
     viewScan.hidden = name !== "scan";
     viewCollection.hidden = name !== "collection";
     scanTab.setAttribute("aria-selected", String(name === "scan"));
-    collectionTab.setAttribute("aria-selected", String(name === "collection"));
-    if (name === "collection") renderCollection();
-  }
-  scanTab.addEventListener("click", () => showView("scan"));
-  collectionTab.addEventListener("click", () => showView("collection"));
-  refreshButton.addEventListener("click", refreshPrices);
-  document.getElementById("export-json").addEventListener("click", exportBackup);
-  document.getElementById("export-csv").addEventListener("click", exportCsv);
-  document.getElementById("import-file").addEventListener("change", (event) => {
-    const file = event.target.files[0];
-    event.target.value = "";
-    if (file) importBackup(file);
-  });
-  stopButton.addEventListener("click", () => { batchStop = true; stopButton.hidden = true; });
-  bulkInput.addEventListener("change", () => {
-    const files = [...bulkInput.files];
-    bulkInput.value = "";
-    if (files.length) runBatch(files);
-  });
-
-  // When the page opens: show the market note and fetch the exchange rate.
-  const speciesReady = loadSpecies();
-  updateNote(currentMarket());
-  renderCollection();
-  loadRate().then(() => { updateNote(currentMarket()); renderCollection(); });
-</script>
-</body>
-</html>
+    collectionTab.setAttribute("aria-selected", String(n
